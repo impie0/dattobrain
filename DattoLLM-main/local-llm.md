@@ -135,7 +135,7 @@ High-risk tools are defined in the `tool_policies` table (`risk_level = 'high'`)
 ### Synthesizer routing (Stage 2)
 
 ```
-Rule 1: Tool result data size > 2,000 tokens
+Rule 1: Tool result data size > 8,000 chars
         → use deepseek/deepseek-r1
         Reason: cheap at large context, good at summarisation
 
@@ -172,7 +172,7 @@ CREATE TABLE llm_routing_config (
 | `orchestrator_default` | `claude-haiku-4-5` | Default tool selection model |
 | `orchestrator_high_risk` | `claude-opus-4-6` | Used when high-risk tools are in scope |
 | `synthesizer_default` | `claude-haiku-4-5` | Default response generation |
-| `synthesizer_large_data` | `deepseek/deepseek-r1` | When tool result exceeds 2,000 tokens |
+| `synthesizer_large_data` | `deepseek/deepseek-r1` | When tool result exceeds 8,000 chars |
 | `synthesizer_high_risk` | `claude-opus-4-6` | When a high-risk tool was called |
 | `synthesizer_cached` | `claude-haiku-4-5` | When data came from local cache |
 
@@ -202,7 +202,7 @@ Orchestrator (tool selection)
 
 Synthesizer (response writing)
   Default model:       [ claude-haiku-4-5     ▼ ]
-  Large data (>2k tok):[ deepseek/deepseek-r1 ▼ ]
+  Large data (>8k chr):[ deepseek/deepseek-r1 ▼ ]
   High-risk tool used: [ claude-opus-4-6      ▼ ]
   Cached mode queries: [ claude-haiku-4-5     ▼ ]
 

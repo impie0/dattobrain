@@ -1,3 +1,12 @@
+---
+tags:
+  - platform/database
+  - rbac
+  - tools
+type: Database
+description: Source-of-truth RBAC table mapping roles to tool names — changes take effect at next token refresh
+---
+
 # Tool Permissions Table
 
 > Part of the [[Datto RMM AI Platform|claude]] knowledge graph · **Database** node

@@ -1,3 +1,12 @@
+---
+tags:
+  - platform/security
+  - docker
+  - network
+type: Security
+description: Two Docker network topology ensuring internal services are structurally unreachable from the public internet
+---
+
 # Network Isolation
 
 > Part of the [[Datto RMM AI Platform|claude]] knowledge graph · **Security** node
@@ -24,6 +33,9 @@ flowchart TD
     APISIX -->|"internal DNS"| Auth
     APISIX -->|"internal DNS"| AI
 ```
+
+> [!success] SEC-006 ✅ — Auth login rate limiting implemented
+> `POST /api/auth/login` is rate-limited via APISIX `limit-req` plugin: 5 req/s sustained, burst 10, `remote_addr` key, 429 rejection. Applied in `services/apisix/init-routes.sh`.
 
 ## Inter-Service Auth
 

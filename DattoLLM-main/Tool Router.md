@@ -1,10 +1,23 @@
+---
+tags:
+  - platform/module
+  - mcp
+  - tools
+type: Module
+description: Registry of all 37 MCP tool definitions — filters to allowed subset per user before passing schemas to the LLM
+---
+
 # Tool Router
 
 > Part of the [[Datto RMM AI Platform|claude]] knowledge graph · **Module** node
 
-**Purpose:** Registry of all 37 MCP tool definitions used by [[AI Service]] to build Anthropic tool call schemas. Only tools matching `allowed_tools` are passed to the LLM.
+**Purpose:** Registry of all 37 MCP tool definitions used by [[AI Service]] to build LLM tool call schemas (OpenAI format, via LiteLLM). Only tools matching `allowed_tools` are passed to the LLM.
 
-**File:** `ai-service/src/toolRegistry.ts`
+**Files (ARCH-002):**
+- `ai-service/src/toolRegistry.ts` — thin re-export shim; all existing imports unchanged
+- `ai-service/src/tools/index.ts` — assembles `toolRegistry` from domain modules
+- `ai-service/src/tools/shared.ts` — `ToolDef` interface + shared constants
+- Domain files: `account.ts` (8) · `sites.ts` (7) · `devices.ts` (5) · `alerts.ts` (1) · `jobs.ts` (5) · `audit.ts` (5) · `activity.ts` (1) · `filters.ts` (2) · `system.ts` (3)
 
 ## Tool Definition Structure
 

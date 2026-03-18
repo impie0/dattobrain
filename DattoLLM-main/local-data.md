@@ -427,10 +427,11 @@ CREATE INDEX idx_datto_cache_alerts_priority   ON datto_cache_alerts (priority);
 
 Datto RMM portal users. Not the same as platform users in the `users` table.
 
+> Note: Datto user objects have no `uid` field, so `email` is the primary key (migration 009 recreated this table with email as PK).
+
 ```sql
 CREATE TABLE datto_cache_users (
-  uid         text PRIMARY KEY,
-  email       text NOT NULL,
+  email       text PRIMARY KEY,             -- Datto users have no uid; email is the unique key
   first_name  text,
   last_name   text,
   role        text,                         -- Datto portal role e.g. 'Admin', 'User'

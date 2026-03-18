@@ -1,3 +1,12 @@
+---
+tags:
+  - platform/database
+  - auth
+  - users
+type: Database
+description: Platform users table with bcrypt credentials, active flag, and approval_authority for tool approval workflows
+---
+
 # Users Table
 
 > Part of the [[Datto RMM AI Platform|claude]] knowledge graph · **Database** node

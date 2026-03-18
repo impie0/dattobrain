@@ -1,3 +1,12 @@
+---
+tags:
+  - platform/security
+  - datto
+  - isolation
+type: Security
+description: Structural guarantee that Datto API credentials exist only in the MCP Server container — never in any other service
+---
+
 # Datto Credential Isolation
 
 > Part of the [[Datto RMM AI Platform|claude]] knowledge graph · **Security** node
@@ -28,6 +37,10 @@ flowchart LR
     Bridge -->|"JSON-RPC + secret header"| MCP
     MCP -->|"OAuth token (in memory only)"| Datto["Datto API"]
 ```
+
+> [!warning] SEC-004 — Split read/write MCP containers before adding write tools
+> The current isolation guarantee ("compromised MCP = read-only data") disappears if write tools share this container and credentials.
+> **Fix:** Split into `mcp-read` (current) and `mcp-write` with separately scoped Datto credentials before any write tool is added. See [[SECURITY_FINDINGS#SEC-004]].
 
 ## Security Properties
 

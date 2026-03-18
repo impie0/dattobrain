@@ -1,0 +1,5 @@
+# PgBouncer userlist — SEC-010
+# auth_type = trust: passwords are not checked, but usernames must be listed here.
+# For production (auth_type = scram-sha-256): replace "" with the SCRAM hash from:
+#   SELECT usename, passwd FROM pg_shadow WHERE usename = 'postgres';
+"postgres" ""

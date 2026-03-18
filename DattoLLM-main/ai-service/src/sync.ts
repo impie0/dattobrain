@@ -513,7 +513,22 @@ async function syncDeviceAudits(db: Pool): Promise<{ audits: number; software: n
 
 // ── Public sync runners ────────────────────────────────────────────────────
 
+// SEC-011: Distributed lock keys for pg_advisory_lock.
+// Prevents two concurrent sync runs from hammering the Datto rate limit simultaneously.
+const LOCK_FULL_SYNC  = 42_424_241;
+const LOCK_ALERT_SYNC = 42_424_242;
+
 export async function runAlertSync(db: Pool, triggeredBy = "schedule"): Promise<void> {
+  // SEC-011: Acquire advisory lock — skip if another alert sync is already running
+  const lockClient = await db.connect();
+  const lockResult = await lockClient.query<{ acquired: boolean }>(
+    "SELECT pg_try_advisory_lock($1) AS acquired", [LOCK_ALERT_SYNC]
+  );
+  if (!lockResult.rows[0]?.acquired) {
+    lockClient.release();
+    return; // Another alert sync is running — skip this invocation
+  }
+
   const logResult = await db.query(
     `INSERT INTO datto_sync_log (triggered_by, status) VALUES ($1, 'running') RETURNING id`,
     [triggeredBy]
@@ -533,10 +548,23 @@ export async function runAlertSync(db: Pool, triggeredBy = "schedule"): Promise<
       [err instanceof Error ? err.message : String(err), logId]
     );
     throw err;
+  } finally {
+    await lockClient.query("SELECT pg_advisory_unlock($1)", [LOCK_ALERT_SYNC]).catch(() => {});
+    lockClient.release();
   }
 }
 
 export async function runSync(db: Pool, triggeredBy = "schedule"): Promise<void> {
+  // SEC-011: Acquire advisory lock — skip if a full sync is already running
+  const lockClient = await db.connect();
+  const lockResult = await lockClient.query<{ acquired: boolean }>(
+    "SELECT pg_try_advisory_lock($1) AS acquired", [LOCK_FULL_SYNC]
+  );
+  if (!lockResult.rows[0]?.acquired) {
+    lockClient.release();
+    return; // Another full sync is running — skip this invocation
+  }
+
   const logResult = await db.query(
     `INSERT INTO datto_sync_log (triggered_by, status) VALUES ($1, 'running') RETURNING id`,
     [triggeredBy]
@@ -583,6 +611,9 @@ export async function runSync(db: Pool, triggeredBy = "schedule"): Promise<void>
       [msg, logId]
     );
     throw err;
+  } finally {
+    await lockClient.query("SELECT pg_advisory_unlock($1)", [LOCK_FULL_SYNC]).catch(() => {});
+    lockClient.release();
   }
 }
 

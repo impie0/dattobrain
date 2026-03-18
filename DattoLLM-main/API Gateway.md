@@ -1,3 +1,12 @@
+---
+tags:
+  - platform/service
+  - gateway
+  - security
+type: Service
+description: Single public entry point — RS256 JWT validation, traffic routing, and rate limiting via APISIX
+---
+
 # API Gateway
 
 > Part of the [[Datto RMM AI Platform|claude]] knowledge graph · **Service** node

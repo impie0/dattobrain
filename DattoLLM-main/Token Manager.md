@@ -1,3 +1,12 @@
+---
+tags:
+  - platform/module
+  - auth
+  - datto
+type: Module
+description: In-memory Datto OAuth token cache inside MCP Server — prevents redundant OAuth round-trips across concurrent tool requests
+---
+
 # Token Manager
 
 > Part of the [[Datto RMM AI Platform|claude]] knowledge graph · **Module** node

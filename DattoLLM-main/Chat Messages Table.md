@@ -1,3 +1,12 @@
+---
+tags:
+  - platform/database
+  - chat
+  - vectors
+type: Database
+description: chat_sessions and chat_messages tables with pgvector HNSW index for cosine similarity semantic search
+---
+
 # Chat Messages Table
 
 > Part of the [[Datto RMM AI Platform|claude]] knowledge graph · **Database** node
@@ -12,6 +21,7 @@ id            uuid PRIMARY KEY DEFAULT uuid_generate_v4()
 user_id       uuid REFERENCES users(id) ON DELETE CASCADE
 title         text
 allowed_tools text[] DEFAULT '{}'   -- tools available at time of session
+data_mode     text NOT NULL DEFAULT 'cached'  -- 'cached' | 'live' — toggled via chat UI
 created_at    timestamptz DEFAULT now()
 updated_at    timestamptz DEFAULT now()
 
@@ -30,8 +40,9 @@ created_at    timestamptz DEFAULT now()
 ## Vector Index
 
 ```sql
-CREATE INDEX chat_messages_embedding_idx ON chat_messages
-  USING ivfflat (embedding vector_cosine_ops) WITH (lists=100);
+-- db/014_hnsw_index.sql (replaces IVFFlat — no training phase, better recall)
+CREATE INDEX chat_messages_embedding_hnsw_idx ON chat_messages
+  USING hnsw (embedding vector_cosine_ops) WITH (m=16, ef_construction=64);
 ```
 
 ## Similarity Search Query

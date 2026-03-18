@@ -1,22 +1,43 @@
 {
-  "collapse-filter": true,
+  "collapse-filter": false,
   "search": "",
-  "showTags": false,
+  "showTags": true,
   "showAttachments": false,
   "hideUnresolved": false,
   "showOrphans": true,
-  "collapse-color-groups": true,
-  "colorGroups": [],
+  "collapse-color-groups": false,
+  "colorGroups": [
+    {
+      "query": "tag:#platform/service",
+      "color": {"a": 1, "rgb": 14702278}
+    },
+    {
+      "query": "tag:#platform/flow",
+      "color": {"a": 1, "rgb": 16744272}
+    },
+    {
+      "query": "tag:#platform/security",
+      "color": {"a": 1, "rgb": 16711680}
+    },
+    {
+      "query": "tag:#platform/database",
+      "color": {"a": 1, "rgb": 6488209}
+    },
+    {
+      "query": "tag:#platform/module",
+      "color": {"a": 1, "rgb": 9699539}
+    }
+  ],
   "collapse-display": true,
   "showArrow": false,
   "textFadeMultiplier": 0,
   "nodeSizeMultiplier": 1,
   "lineSizeMultiplier": 1,
-  "collapse-forces": true,
+  "collapse-forces": false,
   "centerStrength": 0.518713248970312,
   "repelStrength": 10,
   "linkStrength": 1,
   "linkDistance": 250,
-  "scale": 0.5417583425181175,
+  "scale": 1,
   "close": false
 }

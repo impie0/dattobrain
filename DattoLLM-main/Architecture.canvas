@@ -1,0 +1,28 @@
+{
+	"nodes":[
+		{"id":"a1b2c3d4e5f60001","type":"text","text":"## Browser","x":-600,"y":0,"width":200,"height":80},
+		{"id":"a1b2c3d4e5f60002","type":"group","label":"public network","color":"5","x":-300,"y":-200,"width":600,"height":500},
+		{"id":"a1b2c3d4e5f60003","type":"file","file":"DattoLLM-main/API Gateway.md","x":-250,"y":-100,"width":220,"height":120},
+		{"id":"a1b2c3d4e5f60004","type":"file","file":"DattoLLM-main/Web App.md","x":-250,"y":80,"width":220,"height":120},
+		{"id":"a1b2c3d4e5f60005","type":"group","label":"internal network","color":"4","x":400,"y":-300,"width":700,"height":700},
+		{"id":"a1b2c3d4e5f60006","type":"file","file":"DattoLLM-main/Auth Service.md","x":450,"y":-200,"width":200,"height":100},
+		{"id":"a1b2c3d4e5f60007","type":"file","file":"DattoLLM-main/AI Service.md","x":450,"y":-50,"width":200,"height":100},
+		{"id":"a1b2c3d4e5f60008","type":"file","file":"DattoLLM-main/MCP Bridge.md","x":450,"y":100,"width":200,"height":100},
+		{"id":"a1b2c3d4e5f60009","type":"file","file":"DattoLLM-main/MCP Server.md","x":700,"y":100,"width":200,"height":100},
+		{"id":"a1b2c3d4e5f6000a","type":"file","file":"DattoLLM-main/Embedding Service.md","x":700,"y":-200,"width":200,"height":100},
+		{"id":"a1b2c3d4e5f6000b","type":"file","file":"DattoLLM-main/PostgreSQL.md","x":700,"y":-50,"width":200,"height":100},
+		{"id":"a1b2c3d4e5f6000c","type":"text","text":"## Datto API\n`*.centrastage.net`","x":1200,"y":100,"width":200,"height":80}
+	],
+	"edges":[
+		{"id":"e1b2c3d4e5f60001","fromNode":"a1b2c3d4e5f60001","toNode":"a1b2c3d4e5f60003","fromSide":"right","toSide":"left"},
+		{"id":"e1b2c3d4e5f60002","fromNode":"a1b2c3d4e5f60003","toNode":"a1b2c3d4e5f60006","fromSide":"right","toSide":"left"},
+		{"id":"e1b2c3d4e5f60003","fromNode":"a1b2c3d4e5f60003","toNode":"a1b2c3d4e5f60007","fromSide":"right","toSide":"left"},
+		{"id":"e1b2c3d4e5f60004","fromNode":"a1b2c3d4e5f60003","toNode":"a1b2c3d4e5f60004","fromSide":"bottom","toSide":"top","label":":80"},
+		{"id":"e1b2c3d4e5f60005","fromNode":"a1b2c3d4e5f60007","toNode":"a1b2c3d4e5f60008","fromSide":"right","toSide":"left"},
+		{"id":"e1b2c3d4e5f60006","fromNode":"a1b2c3d4e5f60007","toNode":"a1b2c3d4e5f6000a","fromSide":"right","toSide":"left"},
+		{"id":"e1b2c3d4e5f60007","fromNode":"a1b2c3d4e5f60007","toNode":"a1b2c3d4e5f6000b","fromSide":"right","toSide":"left"},
+		{"id":"e1b2c3d4e5f60008","fromNode":"a1b2c3d4e5f60008","toNode":"a1b2c3d4e5f60009","fromSide":"right","toSide":"left"},
+		{"id":"e1b2c3d4e5f60009","fromNode":"a1b2c3d4e5f60006","toNode":"a1b2c3d4e5f6000b","fromSide":"bottom","toSide":"top"},
+		{"id":"e1b2c3d4e5f6000a","fromNode":"a1b2c3d4e5f60009","toNode":"a1b2c3d4e5f6000c","fromSide":"right","toSide":"left","label":"Datto API"}
+	]
+}

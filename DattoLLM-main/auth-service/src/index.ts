@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
-import { handleLogin, handleRefresh, handleIntrospect, handleLegacyLogin, handleLegacyVerify } from "./handlers.js";
+import { handleLogin, handleRefresh, handleIntrospect, handleLegacyLogin, handleLegacyVerify, handleRevoke } from "./handlers.js";
+import { getRedis } from "./redis.js";
 
 function log(level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) {
   const line = JSON.stringify({ level, msg, ts: Date.now(), ...extra });
@@ -19,6 +20,9 @@ function validateEnv() {
 
 validateEnv();
 
+// SEC-002: Initialise Redis client at startup (connects lazily, warns if unavailable)
+getRedis();
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -31,6 +35,9 @@ app.get("/api/auth/verify", handleLegacyVerify);
 app.post("/auth/login", handleLogin);
 app.post("/auth/refresh", handleRefresh);
 app.get("/auth/introspect", handleIntrospect);
+// SEC-002/SEC-008: Token revocation — POST { jti } or { user_id }
+// Called by admin panel (ai-service proxy) for forced-logout, or client for self-logout
+app.post("/auth/revoke", handleRevoke);
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });

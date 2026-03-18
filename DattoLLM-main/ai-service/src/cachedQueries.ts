@@ -9,6 +9,18 @@ import type { Pool } from "pg";
 const CACHED_NOTE = (syncedAt: string | null) =>
   `\n\n[Data from local cache — last synced: ${syncedAt ?? "unknown"}]`;
 
+// SEC-012: Alert data is time-critical. Warn the LLM when alert cache is > 30 minutes old
+// so it can communicate staleness to the user rather than presenting stale data as current.
+const ALERT_CACHED_NOTE = (syncedAt: string | null): string => {
+  if (!syncedAt) return `\n\n[Alert data from local cache — last synced: unknown. Data may be stale.]`;
+  const ageMs = Date.now() - new Date(syncedAt).getTime();
+  const ageMin = Math.round(ageMs / 60_000);
+  const staleness = ageMs > 30 * 60_000
+    ? ` WARNING: alert data is ${ageMin} minutes old — may not reflect current device status.`
+    : ` (${ageMin} min ago)`;
+  return `\n\n[Alert data from local cache — last synced: ${syncedAt}.${staleness}]`;
+};
+
 function latestSync(rows: { synced_at?: Date }[]): string | null {
   if (!rows.length) return null;
   const d = rows[0]?.synced_at;
@@ -107,7 +119,7 @@ export async function cachedListSiteOpenAlerts(db: Pool, args: Record<string, un
     [args["siteUid"]]
   );
   const synced = latestSync(r.rows as { synced_at: Date }[]);
-  return JSON.stringify({ alerts: r.rows.map((row: { data: unknown }) => row.data), count: r.rowCount }) + CACHED_NOTE(synced);
+  return JSON.stringify({ alerts: r.rows.map((row: { data: unknown }) => row.data), count: r.rowCount }) + ALERT_CACHED_NOTE(synced);
 }
 
 // ── Devices ────────────────────────────────────────────────────────────────
@@ -213,7 +225,7 @@ export async function cachedListOpenAlerts(db: Pool, args: Record<string, unknow
   return JSON.stringify({
     alerts: r.rows.map((row: { data: unknown }) => row.data),
     pageDetails: { page, pageSize, count: r.rowCount, totalCount, totalPages: Math.ceil(totalCount / pageSize) },
-  }) + CACHED_NOTE(synced);
+  }) + ALERT_CACHED_NOTE(synced);
 }
 
 export async function cachedListResolvedAlerts(db: Pool, args: Record<string, unknown>): Promise<string> {
@@ -230,14 +242,14 @@ export async function cachedListResolvedAlerts(db: Pool, args: Record<string, un
   return JSON.stringify({
     alerts: r.rows.map((row: { data: unknown }) => row.data),
     pageDetails: { page, pageSize, count: r.rowCount, totalCount, totalPages: Math.ceil(totalCount / pageSize) },
-  }) + CACHED_NOTE(synced);
+  }) + ALERT_CACHED_NOTE(synced);
 }
 
 export async function cachedGetAlert(db: Pool, args: Record<string, unknown>): Promise<string> {
   const r = await db.query(`SELECT data, synced_at FROM datto_cache_alerts WHERE alert_uid = $1`, [args["alertUid"]]);
   if (!r.rows.length) return JSON.stringify({ error: `Alert ${args["alertUid"]} not found in cache` });
   const row = r.rows[0] as { data: unknown; synced_at: Date };
-  return JSON.stringify(row.data) + CACHED_NOTE(new Date(row.synced_at).toISOString());
+  return JSON.stringify(row.data) + ALERT_CACHED_NOTE(new Date(row.synced_at).toISOString());
 }
 
 // ── Filters ────────────────────────────────────────────────────────────────

@@ -1,3 +1,12 @@
+---
+tags:
+  - platform/flow
+  - mcp
+  - tools
+type: Flow
+description: Three-layer permission enforcement from AI Service through MCP Bridge to MCP Server and Datto API
+---
+
 # Tool Execution Flow
 
 > Part of the [[Datto RMM AI Platform|claude]] knowledge graph · **Flow** node

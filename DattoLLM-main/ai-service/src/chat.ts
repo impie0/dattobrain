@@ -115,6 +115,10 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
     let totalToolResultLength = 0;
     let fullStage1Content = "";
 
+    // SEC-015: Context overflow threshold. Break the loop and proceed to Stage 2
+    // with accumulated data rather than crashing with a context-limit API error.
+    const CONTEXT_OVERFLOW_CHARS = 100_000;
+
     // ── STAGE 1: Orchestrator — tool selection loop ───────────────────────────
     while (true) {
       const stream = await llmClient.chat.completions.create({
@@ -199,6 +203,15 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
           tool_call_id: tc.id,
           content: resultText,
         });
+      }
+
+      // SEC-015: Check accumulated context size — break before hitting model limit
+      const ctxLen = conversationMessages.reduce(
+        (sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0), 0
+      );
+      if (ctxLen > CONTEXT_OVERFLOW_CHARS) {
+        log("warn", "context_overflow_truncation", { ctxLen, requestId });
+        break;
       }
     }
 

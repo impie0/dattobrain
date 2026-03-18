@@ -1,6 +1,6 @@
 # Datto RMM AI Platform — Second Brain
 
-> **Obsidian Knowledge Graph** | Version 1.9.0 | 2026-03-18
+> **Obsidian Knowledge Graph** | Version 2.0.0 | 2026-03-18
 > Navigate this file like a graph. Every `[[Node]]` is a clickable link to a section or sibling note.
 
 ---
@@ -49,6 +49,7 @@ graph TD
         Embed["[[Embedding Service]]\n:7001"]
         Bridge["[[MCP Bridge]]\n:4001"]
         MCP["[[MCP Server]]\n:3001"]
+        PGB[("[[PgBouncer]]\n:5432")]
         PG[("[[PostgreSQL]]\n:5432")]
         Redis[("Redis :6379")]
         Etcd["etcd :2379"]
@@ -61,9 +62,10 @@ graph TD
     GW --> WebApp
     GW -->|"/api/auth/*"| Auth
     GW -->|"/api/chat\n/api/history\n/api/admin/*\n/api/tools"| AI
-    Auth --- PG
+    Auth --- PGB
     LiteLLM["[[LiteLLM Gateway]]\n:4000"]
-    AI --- PG
+    AI --- PGB
+    PGB --- PG
     AI --> Embed
     AI --> Bridge
     AI -->|"LLM calls"| LiteLLM
@@ -149,6 +151,35 @@ ngx.req.set_header("X-Allowed-Tools", cjson.encode(pl.allowed_tools or {}))
 - Keys accepted as raw PEM or base64-encoded PEM
 
 **Related nodes:** [[JWT Model]] · [[RBAC System]] · [[Authentication Flow]] · [[Users Table]] · [[Tool Permissions Table]]
+
+---
+
+## PgBouncer
+
+**Purpose:** Connection pooler between services and PostgreSQL. Absorbs reconnect storms on PostgreSQL restarts and caps total connections. **Session mode** is mandatory — `pg_advisory_lock` in `sync.ts` (SEC-011) requires a stable server connection for the lock lifetime.
+
+**Image:** `edoburu/pgbouncer:1.23.1`
+**Port:** `5432` (internal only — same port as PostgreSQL; services point to `pgbouncer:5432`)
+**Config file:** `services/pgbouncer/pgbouncer.ini`
+**Networks:** `internal`
+
+**Key settings:**
+
+| Setting | Value | Why |
+|---|---|---|
+| `pool_mode` | `session` | Required for `pg_advisory_lock` / `pg_advisory_unlock` (SEC-011) |
+| `max_client_conn` | 100 | Total client connections accepted |
+| `default_pool_size` | 20 | Server connections per database+user pair |
+| `auth_type` | `trust` | Dev only — network boundary is the security layer |
+| `server_reset_query` | `DISCARD ALL` | Cleans session state (including leaked advisory locks) on connection return |
+
+**Databases pooled:** `datto_rmm` (auth-service, ai-service), `litellm`
+
+> ⚠️ **Do NOT change to `transaction` mode** — it breaks `pg_try_advisory_lock` in `ai-service/src/sync.ts`. If transaction mode is ever needed, first migrate sync locks to `pg_try_advisory_xact_lock` (auto-releases at transaction end).
+
+> **Production hardening:** Change `auth_type` from `trust` to `scram-sha-256` and populate `userlist.txt` with hashed passwords from `pg_shadow`.
+
+**Related nodes:** [[PostgreSQL]] · [[AI Service]] · [[Auth Service]] · [[Local Data Cache]]
 
 ---
 
@@ -616,7 +647,19 @@ readonly → list-sites, get-system-status,
 
 **Purpose:** Registry of all 37 MCP tool definitions used by [[AI Service]] to build Anthropic tool call schemas. Only tools matching `allowed_tools` are passed to the LLM.
 
-**File:** `ai-service/src/toolRegistry.ts`
+**Files (ARCH-002 — domain split):**
+- `ai-service/src/toolRegistry.ts` — thin re-export shim; all existing imports continue working unchanged
+- `ai-service/src/tools/index.ts` — assembles `toolRegistry` array from all domain modules
+- `ai-service/src/tools/shared.ts` — shared constants (`PAGE_PROPS`, `SITE_UID`, `DEVICE_UID`, `JOB_UID`) and `ToolDef` interface
+- `ai-service/src/tools/account.ts` — 8 account-level tools
+- `ai-service/src/tools/sites.ts` — 7 site tools
+- `ai-service/src/tools/devices.ts` — 5 device tools
+- `ai-service/src/tools/alerts.ts` — 1 alert tool
+- `ai-service/src/tools/jobs.ts` — 5 job tools
+- `ai-service/src/tools/audit.ts` — 5 audit tools
+- `ai-service/src/tools/activity.ts` — 1 activity tool
+- `ai-service/src/tools/filters.ts` — 2 filter tools
+- `ai-service/src/tools/system.ts` — 3 system tools
 
 **Structure per tool:**
 ```typescript
@@ -629,19 +672,19 @@ readonly → list-sites, get-system-status,
 
 **Tool groups (37 total):**
 
-| Group | Count | Examples |
-|---|---|---|
-| Account | 4 | `get-account`, `list-users`, `list-account-variables`, `list-components` |
-| Sites | 7 | `list-sites`, `get-site`, `list-site-devices`, `list-site-open-alerts`, ... |
-| Devices | 9 | `list-devices`, `get-device`, `get-device-by-mac`, `get-device-audit`, ... |
-| Alerts | 5 | `list-open-alerts`, `list-resolved-alerts`, `get-alert`, ... |
-| Jobs | 5 | `get-job`, `get-job-components`, `get-job-results`, `get-job-stdout`, `get-job-stderr` |
-| Audit | 4 | `get-device-audit-by-mac`, `get-esxi-audit`, `get-printer-audit`, `get-device-software` |
-| Activity | 1 | `get-activity-logs` |
-| Filters | 2 | `list-default-filters`, `list-custom-filters` |
-| System | 3 | `get-system-status`, `get-rate-limit`, `get-pagination-config` |
+| Group | File | Count | Examples |
+|---|---|---|---|
+| Account | `tools/account.ts` | 8 | `get-account`, `list-users`, `list-account-variables`, `list-components`, `list-sites` (account-level), `list-devices` (account-level), `list-open-alerts` (account-level) |
+| Sites | `tools/sites.ts` | 7 | `list-sites`, `get-site`, `list-site-devices`, `list-site-open-alerts`, ... |
+| Devices | `tools/devices.ts` | 5 | `get-device`, `list-devices`, `get-device-by-id`, `get-device-by-mac`, `get-device-audit` |
+| Alerts | `tools/alerts.ts` | 1 | `get-alert` |
+| Jobs | `tools/jobs.ts` | 5 | `get-job`, `get-job-components`, `get-job-results`, `get-job-stdout`, `get-job-stderr` |
+| Audit | `tools/audit.ts` | 5 | `get-device-audit-by-mac`, `get-esxi-audit`, `get-printer-audit`, `get-device-software`, `get-device-audit` |
+| Activity | `tools/activity.ts` | 1 | `get-activity-logs` |
+| Filters | `tools/filters.ts` | 2 | `list-default-filters`, `list-custom-filters` |
+| System | `tools/system.ts` | 3 | `get-system-status`, `get-rate-limit`, `get-pagination-config` |
 
-**Called by:** `legacyChat.ts` · `chat.ts` · `admin.ts` (for tools listing)
+**Called by:** `legacyChat.ts` · `chat.ts` · `admin.ts` (for tools listing) — all import from `toolRegistry.ts` shim unchanged
 **Calls:** [[Prompt Builder]] · [[MCP Bridge]]
 
 **Related nodes:** [[RBAC System]] · [[Prompt Builder]] · [[MCP Bridge]] · [[Tool Execution Flow]]
@@ -1003,7 +1046,8 @@ flowchart LR
 | [[Embedding Service]] | 7001 | Internal |
 | [[MCP Bridge]] | 4001 | Internal |
 | [[MCP Server]] | 3001 | Internal |
-| [[PostgreSQL]] | 5432 | Internal |
+| PgBouncer | 5432 | Internal (front of PostgreSQL) |
+| [[PostgreSQL]] | 5432 | Internal (via PgBouncer) |
 | Redis | 6379 | Internal |
 | etcd | 2379 | Internal |
 | Zipkin | 9411 | 127.0.0.1 |

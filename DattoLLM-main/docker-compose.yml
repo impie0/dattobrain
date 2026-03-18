@@ -67,6 +67,24 @@ services:
       timeout: 5s
       retries: 5
 
+  pgbouncer:
+    # SEC-010: connection pooler — session mode required for pg_advisory_lock (SEC-011 sync locks)
+    # edoburu/pgbouncer reads /etc/pgbouncer/pgbouncer.ini and userlist.txt directly (no init override).
+    image: edoburu/pgbouncer:1.23.1
+    volumes:
+      - ./services/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./services/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U postgres || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   auth-service:
     build:
       context: ./auth-service
@@ -74,13 +92,14 @@ services:
     env_file: .env
     environment:
       PORT: 5001
-      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/datto_rmm
+      DATABASE_URL: postgresql://postgres@pgbouncer:5432/datto_rmm  # SEC-010: via PgBouncer
+      REDIS_URL: redis://redis:6379   # SEC-002: JWT revocation via JTI + Redis revocation set
     ports:
-      - "5001:5001"
+      - "127.0.0.1:5001:5001"  # dev only — loopback only, not 0.0.0.0
     networks:
       - internal
     depends_on:
-      postgres:
+      pgbouncer:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:5001/health || exit 1"]
@@ -89,20 +108,23 @@ services:
       retries: 5
 
   litellm:
-    image: ghcr.io/berriai/litellm:main-latest
+    # PIN THIS to a specific release before going to production, e.g. ghcr.io/berriai/litellm:v1.67.2
+    # main-latest is a mutable tag — a breaking upstream change will auto-deploy without warning.
+    # Check releases at https://github.com/BerriAI/litellm/releases and update here + test before bumping.
+    image: ghcr.io/berriai/litellm:main-stable
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
     volumes:
       - ./services/litellm/config.yaml:/app/config.yaml:ro
     env_file: .env
     environment:
       PORT: 4000
-      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/litellm
+      DATABASE_URL: postgresql://postgres@pgbouncer:5432/litellm  # SEC-010: via PgBouncer
     ports:
       - "127.0.0.1:4000:4000"   # UI at http://localhost:4000/ui (dev only)
     networks:
       - internal
     depends_on:
-      postgres:
+      pgbouncer:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')\" || exit 1"]
@@ -118,16 +140,17 @@ services:
     env_file: .env
     environment:
       PORT: 6001
-      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/datto_rmm
+      DATABASE_URL: postgresql://postgres@pgbouncer:5432/datto_rmm  # SEC-010: via PgBouncer
       MCP_BRIDGE_URL: http://mcp-bridge:4001
       EMBEDDING_SERVICE_URL: http://embedding-service:7001
       LITELLM_URL: http://litellm:4000
+      AUTH_SERVICE_URL: http://auth-service:5001  # SEC-008: forced-revoke proxy
     ports:
-      - "6001:6001"
+      - "127.0.0.1:6001:6001"  # dev only — loopback only, not 0.0.0.0
     networks:
       - internal
     depends_on:
-      postgres:
+      pgbouncer:
         condition: service_healthy
       mcp-bridge:
         condition: service_healthy
@@ -158,9 +181,14 @@ services:
       HOSTNAME: "0.0.0.0"
     networks:
       - public
-      - internal
+    # internal network intentionally excluded: web-app must only reach APISIX (public).
+    # All API calls go through the gateway — no direct access to postgres, redis, auth-service, ai-service, or etcd.
 
   etcd:
+    # SECURITY: etcd has no authentication — ALLOW_NONE_AUTHENTICATION=yes is intentional for local dev.
+    # etcd stores all APISIX route/plugin config including JWT validation rules and consumer definitions.
+    # The only control is the internal Docker network boundary (etcd is not on the public network).
+    # To harden for production: set ETCD_ROOT_PASSWORD and configure APISIX etcd.user/etcd.password in config.yaml.
     image: bitnamilegacy/etcd:3.5.11
     environment:
       ALLOW_NONE_AUTHENTICATION: "yes"

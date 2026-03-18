@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import bcrypt from "bcryptjs";
+import { randomUUID } from "node:crypto";
 import { pool } from "./db.js";
 import {
   signAccessToken,
@@ -7,6 +8,7 @@ import {
   generateRefreshToken,
   hashRefreshToken,
 } from "./tokens.js";
+import { trackJti, revokeJti, revokeAllForUser } from "./redis.js";
 
 function log(level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) {
   const line = JSON.stringify({ level, msg, ts: Date.now(), ...extra });
@@ -70,6 +72,8 @@ export async function handleLegacyLogin(req: Request, res: Response): Promise<vo
     const privateKey = process.env["JWT_PRIVATE_KEY"]!;
     const key = privateKey.startsWith("-----") ? privateKey : Buffer.from(privateKey, "base64").toString("utf8");
 
+    // SEC-002: embed jti for revocation support
+    const legacyJti = randomUUID();
     const token = (await import("jsonwebtoken")).default.sign(
       {
         key: "dattoapp",
@@ -78,10 +82,14 @@ export async function handleLegacyLogin(req: Request, res: Response): Promise<vo
         role: primaryRole,
         roles,
         allowed_tools: allowedTools,
+        jti: legacyJti,
       },
       key,
       { algorithm: "RS256", expiresIn: 86400 }
     );
+
+    // Track JTI for possible forced-revoke (SEC-008) — best-effort
+    await trackJti(user.id, legacyJti);
 
     await client.query("UPDATE users SET last_login_at = NOW() WHERE id = $1", [user.id]);
     await client.query(
@@ -159,12 +167,15 @@ export async function handleLogin(req: Request, res: Response): Promise<void> {
     );
     const roles: string[] = rolesResult.rows.map((r: { name: string }) => r.name);
 
-    const accessToken = signAccessToken({
+    const { token: accessToken, jti } = signAccessToken({
       sub: user.id,
       email: user.email,
       roles,
       allowed_tools: allowedTools,
     });
+
+    // SEC-002: track JTI for forced-revoke (SEC-008) — best-effort
+    await trackJti(user.id, jti);
 
     const rawRefresh = generateRefreshToken();
     const tokenHash = hashRefreshToken(rawRefresh);
@@ -237,17 +248,52 @@ export async function handleRefresh(req: Request, res: Response): Promise<void> 
     const userResult = await client.query("SELECT email FROM users WHERE id = $1", [tokenRow.user_id]);
     const email = (userResult.rows[0] as { email: string } | undefined)?.email ?? "";
 
-    const accessToken = signAccessToken({
+    const { token: accessToken, jti } = signAccessToken({
       sub: tokenRow.user_id,
       email,
       roles,
       allowed_tools: allowedTools,
     });
 
+    // SEC-002: track JTI for forced-revoke (SEC-008) — best-effort
+    await trackJti(tokenRow.user_id, jti);
+
     res.json({ access_token: accessToken, expires_in: 3600 });
   } finally {
     client.release();
   }
+}
+
+// SEC-002: Revoke a single JTI (e.g., user-initiated logout)
+// SEC-008: Revoke all tokens for a user (admin forced-logout)
+export async function handleRevoke(req: Request, res: Response): Promise<void> {
+  const { jti, user_id } = req.body as { jti?: string; user_id?: string };
+
+  if (!jti && !user_id) {
+    res.status(400).json({ error: "provide jti (single token) or user_id (all tokens for user)" });
+    return;
+  }
+
+  if (jti) {
+    await revokeJti(jti);
+    log("info", "jti_revoked", { jti });
+    res.json({ revoked: true, jti });
+    return;
+  }
+
+  // user_id path — SEC-008 forced-revoke
+  const count = await revokeAllForUser(user_id!);
+  // Also revoke all refresh tokens for the user in DB
+  await pool.query(
+    "UPDATE refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false",
+    [user_id]
+  ).catch(() => {});
+  await pool.query(
+    "INSERT INTO audit_logs (user_id, event_type) VALUES ($1, $2)",
+    [user_id, "forced_logout"]
+  ).catch(() => {});
+  log("info", "user_tokens_revoked", { userId: user_id, count });
+  res.json({ revoked: true, user_id, jtis_revoked: count });
 }
 
 export async function handleIntrospect(req: Request, res: Response): Promise<void> {

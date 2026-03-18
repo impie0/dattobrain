@@ -104,6 +104,12 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
 
     log("info", "stage1_start", { orchestratorModel, requestId });
 
+    // SEC-015: Context overflow threshold. Large tool results (full device audits,
+    // software lists for 300 devices) can overflow the model's context window.
+    // Break the loop and proceed to Stage 2 with accumulated data rather than
+    // crashing with a context-limit API error.
+    const CONTEXT_OVERFLOW_CHARS = 100_000; // ~25k tokens, safe limit for Haiku 32k ctx
+
     // ── STAGE 1: Orchestrator — tool selection loop ───────────────────────────
     while (true) {
       const completion = await llmClient.chat.completions.create({
@@ -156,6 +162,15 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
           tool_call_id: tc.id,
           content: resultText,
         });
+      }
+
+      // SEC-015: Check accumulated context size — break before hitting model limit
+      const ctxLen = conversationMessages.reduce(
+        (sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0), 0
+      );
+      if (ctxLen > CONTEXT_OVERFLOW_CHARS) {
+        log("warn", "context_overflow_truncation", { ctxLen, requestId });
+        break;
       }
     }
 

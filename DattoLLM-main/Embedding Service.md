@@ -1,3 +1,12 @@
+---
+tags:
+  - platform/service
+  - ai
+  - embeddings
+type: Service
+description: Converts text to 1024-dimensional Voyage-3 embedding vectors for semantic memory search
+---
+
 # Embedding Service
 
 > Part of the [[Datto RMM AI Platform|claude]] knowledge graph · **Service** node

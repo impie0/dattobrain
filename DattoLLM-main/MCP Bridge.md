@@ -1,3 +1,12 @@
+---
+tags:
+  - platform/service
+  - mcp
+  - security
+type: Service
+description: Permission gate between AI Service and MCP Server — enforces allowed_tools before forwarding JSON-RPC tool calls
+---
+
 # MCP Bridge
 
 > Part of the [[Datto RMM AI Platform|claude]] knowledge graph · **Service** node
@@ -7,6 +16,11 @@
 **Build:** `./mcp-bridge`
 **Port:** `4001` (internal only)
 **Key env vars:** `MCP_SERVER_URL`, `MCP_INTERNAL_SECRET`
+
+> [!danger] SEC-001 — Trusts caller-supplied `allowedTools`
+> The bridge validates tool calls against the `allowedTools` array supplied by the AI Service — it does **not** independently verify permissions against the DB. A compromised AI container can forge this array.
+> For read tools this is a defense-in-depth gap. For write tools this is catastrophic.
+> **Fix:** Bridge must query Redis/DB using `userId` and ignore caller-supplied permissions. See [[SECURITY_FINDINGS#SEC-001]].
 
 ## Dependencies
 

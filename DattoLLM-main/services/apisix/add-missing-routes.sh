@@ -16,7 +16,7 @@ cat > /tmp/tools-route.json <<EOF
   "methods": ["GET"],
   "upstream": {
     "type": "roundrobin",
-    "nodes": { "ai-service:3002": 1 }
+    "nodes": { "ai-service:6001": 1 }
   },
   "plugins": {
     "jwt-auth": { "header": "authorization" },
@@ -43,7 +43,7 @@ cat > /tmp/approvals-route.json <<EOF
   "methods": ["GET", "POST"],
   "upstream": {
     "type": "roundrobin",
-    "nodes": { "ai-service:3002": 1 }
+    "nodes": { "ai-service:6001": 1 }
   },
   "plugins": {
     "jwt-auth": { "header": "authorization" },

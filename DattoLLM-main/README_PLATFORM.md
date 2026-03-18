@@ -11,7 +11,7 @@ Layered platform on top of the read-only MCP server: Web UI, AI service, API gat
    ```
 
 2. Seed users (in `.env` set `RUN_SEED=true` for first run):
-   - Usernames: `viewer_user`, `helpdesk_user`, `engineer_user`, `admin_user`
+   - Usernames: `readonly_user`, `helpdesk_user`, `analyst_user`, `admin_user`
    - Password: `secret` (or `SEED_PASSWORD`)
 
 3. Start the stack:
@@ -41,10 +41,10 @@ Layered platform on top of the read-only MCP server: Web UI, AI service, API gat
 
 | Username | Password | Role |
 |----------|----------|------|
-| `viewer_user` | `secret` | Read-only — sites, devices, alerts |
-| `helpdesk_user` | `secret` | + Device lookup, audit, software |
-| `engineer_user` | `secret` | + Jobs, activity logs, site settings |
-| `admin_user` | `secret` | Full access — users, components, account variables |
+| `readonly_user` | `secret` | readonly — sites, system status, rate limit |
+| `helpdesk_user` | `secret` | helpdesk — + devices, alerts |
+| `analyst_user` | `secret` | analyst — + jobs, activity logs, site settings |
+| `admin_user` | `secret` | admin — full access, all 37 tools |
 
 Routes, consumers, and upstreams are defined in `services/apisix/apisix.yaml` (APISIX reloads this file automatically; no GUI dashboard in standalone mode).
 
@@ -79,7 +79,7 @@ Run with **no Datto and no Anthropic** and still see every call:
 # Login
 curl -X POST http://localhost/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"viewer_user","password":"secret"}'
+  -d '{"username":"readonly_user","password":"secret"}'
 # → { "token": "eyJ..." }
 
 # Chat (use token from above)

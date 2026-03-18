@@ -1,5 +1,5 @@
 import jwt from "jsonwebtoken";
-import { randomBytes, createHash } from "node:crypto";
+import { randomBytes, createHash, randomUUID } from "node:crypto";
 
 const ACCESS_TOKEN_TTL = 3600;
 
@@ -14,8 +14,11 @@ function getPublicKey(): string {
   return raw.startsWith("-----") ? raw : Buffer.from(raw, "base64").toString("utf8");
 }
 
-export function signAccessToken(payload: object): string {
-  return jwt.sign(payload, getPrivateKey(), { algorithm: "RS256", expiresIn: ACCESS_TOKEN_TTL });
+/** Signs an RS256 access token. Embeds a `jti` (JWT ID) for revocation (SEC-002). */
+export function signAccessToken(payload: object): { token: string; jti: string } {
+  const jti = randomUUID();
+  const token = jwt.sign({ ...payload, jti }, getPrivateKey(), { algorithm: "RS256", expiresIn: ACCESS_TOKEN_TTL });
+  return { token, jti };
 }
 
 export function verifyAccessToken(token: string): object {

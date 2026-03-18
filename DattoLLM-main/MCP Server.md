@@ -1,3 +1,12 @@
+---
+tags:
+  - platform/service
+  - mcp
+  - datto
+type: Service
+description: The only container with Datto credentials — exposes 37 read-only tools over MCP HTTP transport
+---
+
 # MCP Server
 
 > Part of the [[Datto RMM AI Platform|claude]] knowledge graph · **Service** node

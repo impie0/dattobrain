@@ -51,12 +51,12 @@ upstreams:
     name: auth-service
     type: roundrobin
     nodes:
-      "auth-service:3001": 1
+      "auth-service:5001": 1
   - id: 2
     name: ai-service
     type: roundrobin
     nodes:
-      "ai-service:3002": 1
+      "ai-service:6001": 1
   - id: 3
     name: web-app
     type: roundrobin
@@ -77,11 +77,17 @@ consumers:
 # (ctx.jwt_auth_payload is not reliably available in serverless-post-function)
 
 routes:
-  # Auth: login (no JWT), verify
+  # Auth: login (no JWT), verify — rate-limited to prevent brute-force (SEC-006)
   - uri: /api/auth/*
     upstream_id: 1
     methods: [GET, POST]
     name: auth-route
+    plugins:
+      limit-req:
+        rate: 5       # 5 req/s sustained
+        burst: 10     # allow brief bursts
+        key: remote_addr
+        rejected_code: 429
 
   # Chat & history: require JWT, inject X-User-Id and X-User-Role
   - uri: /api/chat

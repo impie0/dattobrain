@@ -1,3 +1,12 @@
+---
+tags:
+  - platform/module
+  - ai
+  - llm
+type: Module
+description: Constructs the LLM system prompt from platform instructions, filtered tool definitions, and semantically similar past messages
+---
+
 # Prompt Builder
 
 > Part of the [[Datto RMM AI Platform|claude]] knowledge graph · **Module** node
@@ -5,7 +14,10 @@
 **Purpose:** Constructs the LLM system prompt from three blocks: platform instructions, filtered tool definitions, and semantically similar past messages.
 
 **File:** `ai-service/src/prompt.ts`
-**Function:** `buildSystemPrompt(allowedToolDefs, similarMessages): string`
+
+**Exported functions:**
+- `buildSystemPrompt(allowedToolDefs, similarMessages): string` — Stage 1 orchestrator system prompt
+- `buildSynthesizerPrompt(): string` — Stage 2 synthesizer system prompt
 
 ## Prompt Structure
 
@@ -28,7 +40,8 @@
 
 By only injecting tool definitions for tools in `allowed_tools`, the model is prevented from even knowing other tools exist. Even if a user prompts "use the delete-device tool", the model has no schema for it.
 
-**Called by:** `legacyChat.ts:handleLegacyChat` · `chat.ts:handleChat`
+**`buildSystemPrompt` called by:** `legacyChat.ts:handleLegacyChat` · `chat.ts:handleChat` (Stage 1 orchestrator prompt)
+**`buildSynthesizerPrompt` called by:** `legacyChat.ts` · `chat.ts` (Stage 2 synthesizer prompt)
 **Receives:** Filtered tool defs from [[Tool Router]], similar messages from [[Embedding Service]] / pgvector
 
 ## Related Nodes

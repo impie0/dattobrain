@@ -65,6 +65,23 @@ export function invalidateRoutingConfigCache(): void {
 
 // ── Routing decision functions (pure — no DB calls) ──────────────────────────
 
+/**
+ * Selects the Stage 1 orchestrator model.
+ *
+ * SEC-013 / ADR-003 resolution: scope-based selection is the CHOSEN approach.
+ * When a user has any high-risk tool in their allowed set, the more capable/cautious
+ * orchestrator is used for ALL their queries — not just when the risky tool is called.
+ *
+ * Trade-off: admin users pay `orchestrator_high_risk` cost even for simple read queries.
+ * This is accepted because:
+ *   1. Correctness — a smarter orchestrator avoids boundary mistakes when risky tools exist.
+ *   2. Phase 0 has no write tools — admin overhead is currently read-only queries only.
+ * Revisit when write tools are added: consider execution-based upgrade (cheaper Stage 1
+ * for everyone, escalate only after a high-risk tool is actually called in the loop).
+ *
+ * Synthesizer selection is already execution-based (checkToolHighRisk per call).
+ * This inconsistency is intentional and documented — see SECURITY_FINDINGS SEC-013.
+ */
 export function selectOrchestratorModel(
   config: RoutingConfig,
   highRiskInScope: boolean

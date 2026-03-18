@@ -29,11 +29,18 @@ function log(level: "info" | "warn" | "error", msg: string, extra?: Record<strin
 }
 
 function validateEnv() {
-  for (const key of ["DATABASE_URL", "ANTHROPIC_API_KEY", "MCP_BRIDGE_URL", "EMBEDDING_SERVICE_URL"]) {
+  for (const key of ["DATABASE_URL", "MCP_BRIDGE_URL", "EMBEDDING_SERVICE_URL"]) {
     if (!process.env[key]) {
       log("error", `Missing required environment variable: ${key}`);
       process.exit(1);
     }
+  }
+  // SEC-007: LiteLLM without a master key leaves /v1 open to any container on
+  // the internal network — an API credit exfiltration risk. If LITELLM_URL is
+  // set, LITELLM_MASTER_KEY must also be set.
+  if (process.env["LITELLM_URL"] && !process.env["LITELLM_MASTER_KEY"]) {
+    log("error", "LITELLM_URL is set but LITELLM_MASTER_KEY is empty. Set LITELLM_MASTER_KEY to secure the LiteLLM gateway. See SECURITY_FINDINGS.md SEC-007.");
+    process.exit(1);
   }
 }
 
@@ -118,6 +125,25 @@ app.get("/api/approvals/approvable", handleGetApprovable);
 app.post("/api/approvals/:id/approve", handleUserApprove);
 app.post("/api/approvals/:id/reject", handleUserReject);
 
+// ── Admin — forced logout (SEC-008) ────────────────────────────────────────
+// Proxies to auth-service /auth/revoke — revokes all active JTIs for the user
+app.post("/api/admin/users/:id/revoke", async (req, res) => {
+  const userRole = req.headers["x-user-role"] as string | undefined;
+  if (userRole !== "admin") { res.status(403).json({ error: "admin only" }); return; }
+  const authServiceUrl = process.env["AUTH_SERVICE_URL"] ?? "http://auth-service:5001";
+  try {
+    const r = await fetch(`${authServiceUrl}/auth/revoke`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: req.params["id"] }),
+    });
+    const body = await r.json();
+    res.status(r.status).json(body);
+  } catch (err) {
+    res.status(502).json({ error: "auth-service unavailable", detail: String(err) });
+  }
+});
+
 // ── Admin — users ──────────────────────────────────────────────────────────
 app.get("/api/admin/users", handleAdminGetUsers);
 app.post("/api/admin/users", handleAdminCreateUser);
@@ -201,6 +227,30 @@ app.post("/api/admin/sync", async (req, res) => {
       runSync(pool, "manual").catch(() => {});
     }
   });
+});
+
+// SEC-016: Sync health endpoint — surfaces staleness so admins know when data is stale
+app.get("/api/admin/sync/health", async (req, res) => {
+  const userRole = req.headers["x-user-role"] as string | undefined;
+  if (userRole !== "admin") { res.status(403).json({ error: "admin only" }); return; }
+  try {
+    const result = await pool.query<{ completed_at: Date; status: string }>(
+      `SELECT completed_at, status FROM datto_sync_log
+       WHERE status = 'completed' AND triggered_by IN ('schedule','manual')
+       ORDER BY started_at DESC LIMIT 1`
+    );
+    const last = result.rows[0];
+    if (!last) {
+      res.json({ status: "never_run", lastSuccess: null, ageMinutes: null });
+      return;
+    }
+    const ageMs = Date.now() - new Date(last.completed_at).getTime();
+    const ageMinutes = Math.round(ageMs / 60_000);
+    const status = ageMinutes > 26 * 60 ? "stale" : "ok";
+    res.json({ status, lastSuccess: last.completed_at, ageMinutes });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 app.post("/api/admin/sync/pause", (req, res) => {

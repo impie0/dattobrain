@@ -1,3 +1,12 @@
+---
+tags:
+  - platform/database
+  - rbac
+  - auth
+type: Database
+description: roles and user_roles tables — many-to-many role assignments with union-based effective tool list computation
+---
+
 # Roles Table
 
 > Part of the [[Datto RMM AI Platform|claude]] knowledge graph · **Database** node

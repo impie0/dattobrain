@@ -1,8 +1,8 @@
 # Architecture Documentation
 ## AI-Powered Datto RMM Platform via MCP
 
-**Version:** 1.8.0
-**Date:** 2026-03-17
+**Version:** 2.0.0
+**Date:** 2026-03-19
 **Status:** Production
 
 ---
@@ -50,8 +50,9 @@ This platform provides an AI-powered conversational interface over the Datto RMM
 | **Embedding Service** | `embedding-service` | Converts text to embedding vectors (Voyage or OpenAI). Used by AI Service for semantic search. |
 | **MCP Bridge** | `mcp-bridge` | HTTP client that enforces the `allowed_tools` permission gate and forwards tool calls to MCP Server. |
 | **MCP Server** | `mcp-server` | The only container with Datto credentials. Exposes 37 read-only GET tools over HTTP (MCP protocol). |
+| **PgBouncer** | `pgbouncer` | Connection pooler (session mode) sitting in front of PostgreSQL. Absorbs reconnect storms; required for PostgreSQL advisory locks (sync distributed lock). |
 | **PostgreSQL + pgvector** | `postgres` | Stores users, roles, tool permissions, chat history + embeddings, refresh tokens, audit logs, Datto data cache. |
-| **Redis** | `redis` | Ephemeral cache for API Gateway rate-limit counters. |
+| **Redis** | `redis` | JWT revocation set (`revoked_jtis:<jti>`), JTI tracking per user (`user_jtis:<userId>`), API Gateway rate-limit counters. |
 | **etcd** | `etcd` | Configuration store for APISIX (routes, upstreams, consumers, plugins). |
 | **Zipkin** | `zipkin` | Distributed tracing. APISIX reports all request spans. |
 | **APISIX Dashboard** | `apisix-dashboard` | Admin GUI for managing APISIX routes and plugins (dev only, localhost). |
@@ -90,8 +91,9 @@ graph TD
         Embed["🔢 embedding-service\n:7001\nPOST /embed"]
         MCPBridge["🌉 mcp-bridge\n:4001\nPOST /tool-call"]
         MCPServer["⚙️ mcp-server\n:3001\nPOST /mcp\nGET /health\nGET /metrics"]
+        PGB[("🔁 pgbouncer\nedoburu:1.23.1\n:5432\nsession mode")]
         PG[("🗄️ postgres\npgvector/pgvector:pg16\n:5432\ndatto_rmm + litellm DBs")]
-        Redis[("⚡ redis\nredis:7-alpine")]
+        Redis[("⚡ redis\nredis:7-alpine\nrevoked_jtis + user_jtis")]
         Etcd["🗂️ etcd\nbitnami:3.5.11\n:2379"]
         Zipkin["🔍 zipkin\n:9411"]
         Dashboard["🖥️ apisix-dashboard\n:9000\n(127.0.0.1 only)"]
@@ -108,8 +110,9 @@ graph TD
     APISIX -->|"request spans"| Zipkin
     Dashboard <-->|"admin API"| Etcd
 
-    AuthSvc <-->|"users, roles\ntool_permissions\nrefresh_tokens"| PG
-    AISvc <-->|"chat_sessions\nchat_messages\naudit_logs"| PG
+    AuthSvc <-->|"users, roles\ntool_permissions\nrefresh_tokens"| PGB
+    AISvc <-->|"chat_sessions\nchat_messages\naudit_logs"| PGB
+    PGB <-->|"pooled connections"| PG
     AISvc -->|"POST /embed"| Embed
     AISvc -->|"Stage 1 orchestrator\nStage 2 synthesizer"| LiteLLM
     AISvc -->|"POST /tool-call\n{toolName, toolArgs,\nallowedTools}"| MCPBridge
@@ -118,7 +121,7 @@ graph TD
     DattoAPI -->|"JSON response"| MCPServer
     APISIX <-->|"rate-limit counters"| Redis
     LiteLLM <-->|"provider routing\n(Anthropic SDK / OpenAI-compat)"| LLMAPIs
-    LiteLLM <-->|"virtual keys\nusage logs"| PG
+    LiteLLM <-->|"virtual keys\nusage logs"| PGB
 
     style public fill:#fff3e0,stroke:#ff9800
     style internal fill:#e8f5e9,stroke:#4caf50
@@ -140,10 +143,11 @@ Every container that runs in the platform — what it is, what port it listens o
 
 ```mermaid
 graph LR
-    PG["postgres\n:5432"] --> MCP["mcp-server\n:3001"]
-    PG --> Auth["auth-service\n:5001"]
-    PG --> AI["ai-service\n:6001"]
-    PG --> LiteLLM["litellm\n:4000"]
+    PG["postgres\n:5432"] --> PGB["pgbouncer\n:5432"]
+    PG --> MCP["mcp-server\n:3001"]
+    PGB --> Auth["auth-service\n:5001"]
+    PGB --> AI["ai-service\n:6001"]
+    PGB --> LiteLLM["litellm\n:4000"]
     MCP --> Bridge["mcp-bridge\n:4001"]
     Bridge --> AI
     Embed["embedding-service\n:7001"] --> AI
@@ -153,19 +157,20 @@ graph LR
     AI --> APISIX
 ```
 
-No service starts until all its upstream dependencies pass their health check. `postgres` is the root dependency for all data services. `etcd` is the root dependency for APISIX.
+No service starts until all its upstream dependencies pass their health check. `postgres` is the root dependency for all data services. `pgbouncer` sits directly in front of PostgreSQL — auth-service, ai-service, and litellm all depend on pgbouncer's healthcheck, not postgres directly. `etcd` is the root dependency for APISIX.
 
 ### 3.2 Service Table
 
 | Container | Image / Build | Internal Port | Exposed to Host | Network | Health Check | Depends On |
 |---|---|---|---|---|---|---|
 | `postgres` | `pgvector/pgvector:pg16` | 5432 | No | internal | `pg_isready -U postgres` | — |
+| `pgbouncer` | `edoburu/pgbouncer:1.23.1` | 5432 | No | internal | `pg_isready -h 127.0.0.1` | postgres ✓ |
 | `mcp-server` | `./read-only-mcp` | 3001 | No | internal | `GET /health` | postgres ✓ |
 | `mcp-bridge` | `./mcp-bridge` | 4001 | No | internal | `GET /health` | mcp-server ✓ |
-| `auth-service` | `./auth-service` | 5001 | **5001** | internal | `GET /health` | postgres ✓ |
+| `auth-service` | `./auth-service` | 5001 | **5001** | internal | `GET /health` | pgbouncer ✓ |
 | `embedding-service` | `./embedding-service` | 7001 | No | internal | `GET /health` | — |
-| `ai-service` | `./ai-service` | 6001 | **6001** | internal | `GET /health` | postgres ✓, mcp-bridge ✓, embedding-service ✓, litellm ✓ |
-| `litellm` | `ghcr.io/berriai/litellm:main-latest` | 4000 | **127.0.0.1:4000** | internal | `GET /health` (python3) | postgres ✓ |
+| `ai-service` | `./ai-service` | 6001 | **6001** | internal | `GET /health` | pgbouncer ✓, mcp-bridge ✓, embedding-service ✓, litellm ✓ |
+| `litellm` | `ghcr.io/berriai/litellm:main-stable` | 4000 | **127.0.0.1:4000** | internal | `GET /health` (python3) | pgbouncer ✓ |
 | `redis` | `redis:7-alpine` | 6379 | No | internal | — | — |
 | `etcd` | `bitnamilegacy/etcd:3.5.11` | 2379 | No | internal | `etcdctl endpoint health` | — |
 | `apisix` | `apache/apisix:3.9.0-debian` | 9080 | **80** | public + internal | — | etcd ✓, auth-service, ai-service |
@@ -210,7 +215,7 @@ No service starts until all its upstream dependencies pass their health check. `
 | `MCP_INTERNAL_SECRET` | `mcp-server`, `mcp-bridge` | `.env` file — same value both sides |
 | `MCP_SERVER_URL` | `mcp-bridge` | `docker-compose.yml` → `http://mcp-server:3001` |
 | `MCP_BRIDGE_URL` | `ai-service` | `docker-compose.yml` → `http://mcp-bridge:4001` |
-| `DATABASE_URL` | `auth-service`, `ai-service` | `docker-compose.yml` → `postgresql://postgres:...@postgres:5432/datto_rmm` |
+| `DATABASE_URL` | `auth-service`, `ai-service` | `docker-compose.yml` → `postgresql://postgres@pgbouncer:5432/datto_rmm` (SEC-010: via PgBouncer) |
 | `JWT_PRIVATE_KEY` | `auth-service` | `.env` file (RS256 PEM) |
 | `JWT_PUBLIC_KEY` | `auth-service` | `.env` file (RS256 PEM) |
 | `ANTHROPIC_API_KEY` | `ai-service`, `litellm` | `.env` file |
@@ -233,9 +238,11 @@ mcp-bridge   → http://mcp-server:3001/mcp         (Docker DNS)
 ai-service   → http://mcp-bridge:4001/tool-call    (Docker DNS)
 ai-service   → http://embedding-service:7001/embed
 ai-service   → http://litellm:4000                 (LLM proxy — Stage 1 + Stage 2)
-ai-service   → postgresql://postgres:5432/datto_rmm
-auth-service → postgresql://postgres:5432/datto_rmm
-litellm      → postgresql://postgres:5432/litellm  (separate DB for virtual keys + usage)
+ai-service   → postgresql://postgres@pgbouncer:5432/datto_rmm  (SEC-010: via PgBouncer)
+auth-service → postgresql://postgres@pgbouncer:5432/datto_rmm  (SEC-010: via PgBouncer)
+litellm      → postgresql://postgres@pgbouncer:5432/litellm    (SEC-010: via PgBouncer)
+pgbouncer    → postgresql://postgres:5432/datto_rmm            (direct — pooler → DB)
+pgbouncer    → postgresql://postgres:5432/litellm              (direct — pooler → DB)
 apisix       → http://auth-service:5001            (APISIX upstream)
 apisix       → http://ai-service:6001              (APISIX upstream)
 apisix       → http://web-app:3000                 (APISIX upstream)
@@ -938,23 +945,24 @@ CREATE EXTENSION IF NOT EXISTS vector;
 ALTER TABLE chat_messages
   ADD COLUMN embedding vector(1536);
 
--- IVFFlat index for approximate nearest-neighbour search
--- lists = sqrt(total rows) is a reasonable starting point
+-- HNSW index for approximate nearest-neighbour search (SEC-014, db/014_hnsw_index.sql)
+-- HNSW has no rebuild requirement and maintains recall quality as the table grows.
+-- m=16: connections per layer; ef_construction=64: build-time quality/speed trade-off.
 CREATE INDEX chat_messages_embedding_idx
   ON chat_messages
-  USING ivfflat (embedding vector_cosine_ops)
-  WITH (lists = 100);
+  USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
 ```
 
 **Index type choice:**
 
 | Index | Speed | Accuracy | When to use |
 |---|---|---|---|
-| `ivfflat` | Fast | ~95% recall | Default — good up to ~5M rows |
-| `hnsw` | Faster | ~99% recall | Use when recall accuracy is critical or rows > 5M |
+| `ivfflat` | Fast | ~95% recall | Legacy — requires periodic REINDEX as table grows |
+| `hnsw` | Faster | ~99% recall | **Current** — no rebuild requirement, better at scale |
 | None (exact) | Slow | 100% | Only for tables under ~50k rows |
 
-The platform starts with `ivfflat`. The index should be rebuilt (`REINDEX`) when the table grows significantly to re-cluster the lists.
+The platform uses **HNSW** (migration `db/014_hnsw_index.sql`, SEC-014). HNSW has no rebuild requirement and maintains query quality as the table grows — unlike IVFFlat which degrades without periodic `REINDEX`.
 
 ### 9.5 Similarity Threshold
 
@@ -990,7 +998,14 @@ All requests to the platform must carry a valid JWT in the `Authorization: Beare
 3. Verify signature against the Auth Service public key — reject `401` if invalid.
 4. Check `exp` claim — reject `401` with `"token_expired"` if stale.
 5. Check `nbf` claim if present — reject `401` if not yet valid.
-6. Extract `user_id` and `allowed_tools` from payload — attach to forwarded request context.
+6. **Check `jti` claim against Redis revocation set** — if `EXISTS revoked_jtis:<jti>` returns 1, reject `401` immediately (SEC-002).
+7. Extract `user_id` and `allowed_tools` from payload — attach to forwarded request context.
+
+**JTI revocation (SEC-002):**
+- Every access token now carries a `jti: uuid` claim set at signing time in `auth-service/src/tokens.ts`.
+- `auth-service/src/redis.ts` tracks issued JTIs per user in a Redis sorted set (`user_jtis:<userId>`) and writes revoked JTIs to `revoked_jtis:<jti>` (TTL = token expiry, 1h).
+- APISIX Lua `serverless-post-function` checks the revocation set via `resty.redis` on every protected request — fail-open (Redis unavailable) during rollout.
+- `POST /auth/revoke` in Auth Service revokes a single JTI or all active JTIs for a user (forced-revoke, SEC-008).
 
 The public key is distributed to the API Gateway at deploy time. The Auth Service private key never leaves the Auth Service container.
 
@@ -998,11 +1013,12 @@ The public key is distributed to the API Gateway at deploy time. The Auth Servic
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Active: Login — access_token issued
+    [*] --> Active: Login — access_token + jti issued\nJTI tracked in Redis user_jtis:<userId>
     Active --> Expired: exp reached (1 hour)
-    Expired --> Active: Refresh — new access_token issued\nallowed_tools re-queried from DB
-    Active --> Revoked: Admin action or suspicious activity
-    Revoked --> [*]: User must log in again
+    Expired --> Active: Refresh — new access_token + new jti issued\nallowed_tools re-queried from DB
+    Active --> Revoked: Admin forced-revoke\n(POST /api/admin/users/:id/revoke)\nAll user JTIs written to revoked_jtis:<jti>
+    Active --> Revoked: Single-token revoke\n(POST /auth/revoke {jti})\nrevoked_jtis:<jti> SET EX 3600
+    Revoked --> [*]: APISIX Lua rejects 401 on next request\nUser must log in again
     Expired --> [*]: Refresh token also expired (7 days)\nUser must log in again
 ```
 
@@ -1676,7 +1692,48 @@ Stored in `llm_routing_config` DB table (migration `db/012_llm_routing_config.sq
 | `services/web-app/src/lib/api.ts` | Added `getLlmConfig`, `putLlmConfig`, `getLlmModels`, `LlmLogSummary` model fields |
 | `services/web-app/src/app/admin/layout.tsx` | Added "LLM Config" nav link |
 
+### New Files (v2.0.0 — Phase 0 security hardening)
+
+| File | Purpose |
+|---|---|
+| `services/pgbouncer/pgbouncer.ini` | PgBouncer config — session mode, max_client_conn=100, default_pool_size=20 (SEC-010) |
+| `services/pgbouncer/userlist.txt` | PgBouncer userlist — trust auth for dev; swap for scram-sha-256 hashes in production (SEC-010) |
+| `auth-service/src/redis.ts` | Redis client singleton — JTI tracking (`user_jtis:<userId>`), revocation (`revoked_jtis:<jti>`), forced-revoke (SEC-002, SEC-008) |
+| `db/014_hnsw_index.sql` | Migration — drops IVFFlat index, creates HNSW (`m=16, ef_construction=64`) on `chat_messages.embedding` (SEC-014) |
+| `ai-service/src/tools/shared.ts` | Shared constants (`PAGE_PROPS`, `SITE_UID`, `DEVICE_UID`, `JOB_UID`) and `ToolDef` interface (ARCH-002) |
+| `ai-service/src/tools/account.ts` | 8 account-level tool definitions (ARCH-002) |
+| `ai-service/src/tools/sites.ts` | 7 site tool definitions (ARCH-002) |
+| `ai-service/src/tools/devices.ts` | 5 device tool definitions (ARCH-002) |
+| `ai-service/src/tools/alerts.ts` | 1 alert tool definition (ARCH-002) |
+| `ai-service/src/tools/jobs.ts` | 5 job tool definitions (ARCH-002) |
+| `ai-service/src/tools/audit.ts` | 5 audit tool definitions (ARCH-002) |
+| `ai-service/src/tools/activity.ts` | 1 activity tool definition (ARCH-002) |
+| `ai-service/src/tools/filters.ts` | 2 filter tool definitions (ARCH-002) |
+| `ai-service/src/tools/system.ts` | 3 system tool definitions (ARCH-002) |
+| `ai-service/src/tools/index.ts` | Assembles full `toolRegistry` array from domain modules; re-exports `ToolDef` type (ARCH-002) |
+
+### Modified Files (v2.0.0)
+
+| File | Change |
+|---|---|
+| `docker-compose.yml` | Added `pgbouncer` service (SEC-010); auth-service/ai-service/litellm routed through pgbouncer; added `REDIS_URL` to auth-service, `AUTH_SERVICE_URL` to ai-service |
+| `auth-service/src/tokens.ts` | `signAccessToken()` embeds `jti: randomUUID()`, returns `{token, jti}` (SEC-002) |
+| `auth-service/src/handlers.ts` | `handleLogin`/`handleRefresh` destructure `{token, jti}`, call `trackJti()`; added `handleRevoke()` (SEC-002, SEC-008) |
+| `auth-service/src/index.ts` | Added `POST /auth/revoke` route (SEC-008) |
+| `auth-service/package.json` | Added `ioredis ^5.4.1` dependency (SEC-002) |
+| `ai-service/src/index.ts` | `validateEnv()` startup check for `LITELLM_MASTER_KEY` (SEC-007); `GET /api/admin/sync/health` endpoint (SEC-016); `POST /api/admin/users/:id/revoke` proxy (SEC-008) |
+| `ai-service/src/sync.ts` | PostgreSQL advisory locks on `runSync` and `runAlertSync` to prevent concurrent runs (SEC-011) |
+| `ai-service/src/cachedQueries.ts` | `ALERT_CACHED_NOTE()` appended to all alert query results — warns when cache is > 30 min old (SEC-012) |
+| `ai-service/src/llmConfig.ts` | JSDoc documenting scope-based orchestrator routing as intentional — ADR-003 resolved (SEC-013) |
+| `ai-service/src/chat.ts` | Context overflow guard — breaks Stage 1 loop at 100k chars (SEC-015) |
+| `ai-service/src/legacyChat.ts` | Context overflow guard — breaks Stage 1 loop at 100k chars (SEC-015) |
+| `ai-service/src/toolRegistry.ts` | Rewritten as thin re-export shim; all 37 definitions moved to `src/tools/` domain files (ARCH-002) |
+| `services/apisix/init-routes.sh` | Added `limit-req` plugin to auth route (SEC-006); Lua function extended with Redis JTI revocation check (SEC-002); fixed auth-service/ai-service port references |
+| `services/apisix/apisix.yaml` | Fixed upstream ports; added `limit-req` reference to auth route (SEC-006) |
+| `services/apisix/add-missing-routes.sh` | Fixed ai-service port reference |
+| `.env.example` | Added `REDIS_URL` section documenting SEC-002/SEC-008 purpose |
+
 ---
 
 *Document generated for the Datto RMM AI Platform — internal use only.*
-*Version 1.9.0 — Section 15: updated LiteLLM routing to reflect OpenAI SDK for all models, Claude via OpenRouter, new migrations 013, LLM logs model badges.*
+*Version 2.0.0 — Phase 0 security hardening: PgBouncer (SEC-010), JTI revocation (SEC-002), forced-revoke (SEC-008), rate limiting (SEC-006), sync lock (SEC-011), context overflow guard (SEC-015), alert staleness indicator (SEC-012), HNSW index migration (SEC-014), sync health endpoint (SEC-016), toolRegistry domain split (ARCH-002).*
