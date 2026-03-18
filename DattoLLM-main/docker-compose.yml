@@ -1,0 +1,223 @@
+# Datto RMM AI Platform — local dev
+# Run: docker compose up --build
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: datto_rmm
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d datto_rmm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mcp-server:
+    build:
+      context: ./read-only-mcp
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      PORT: 3001
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mcp-bridge:
+    build:
+      context: ./mcp-bridge
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      PORT: 4001
+      MCP_SERVER_URL: http://mcp-server:3001
+    networks:
+      - internal
+    depends_on:
+      mcp-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  embedding-service:
+    build:
+      context: ./embedding-service
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      PORT: 7001
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  auth-service:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      PORT: 5001
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/datto_rmm
+    ports:
+      - "5001:5001"
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
+    volumes:
+      - ./services/litellm/config.yaml:/app/config.yaml:ro
+    env_file: .env
+    environment:
+      PORT: 4000
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/litellm
+    ports:
+      - "127.0.0.1:4000:4000"   # UI at http://localhost:4000/ui (dev only)
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')\" || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  ai-service:
+    build:
+      context: ./ai-service
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      PORT: 6001
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/datto_rmm
+      MCP_BRIDGE_URL: http://mcp-bridge:4001
+      EMBEDDING_SERVICE_URL: http://embedding-service:7001
+      LITELLM_URL: http://litellm:4000
+    ports:
+      - "6001:6001"
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mcp-bridge:
+        condition: service_healthy
+      embedding-service:
+        condition: service_healthy
+      litellm:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:6001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - ./services/redis/redis.conf:/usr/local/etc/redis/redis.conf
+    command: redis-server /usr/local/etc/redis/redis.conf
+    networks:
+      - internal
+
+  web-app:
+    build:
+      context: ./services/web-app
+      dockerfile: Dockerfile
+    environment:
+      NEXT_PUBLIC_API_URL: ""
+      HOSTNAME: "0.0.0.0"
+    networks:
+      - public
+      - internal
+
+  etcd:
+    image: bitnamilegacy/etcd:3.5.11
+    environment:
+      ALLOW_NONE_AUTHENTICATION: "yes"
+      ETCD_ADVERTISE_CLIENT_URLS: "http://etcd:2379"
+      ETCD_LISTEN_CLIENT_URLS: "http://0.0.0.0:2379"
+    volumes:
+      - etcd_data:/bitnami/etcd
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "/opt/bitnami/etcd/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  apisix:
+    image: apache/apisix:3.9.0-debian
+    ports:
+      - "80:9080"
+      - "127.0.0.1:9180:9180"
+    volumes:
+      - ./services/apisix/config.yaml:/usr/local/apisix/conf/config.yaml
+    depends_on:
+      etcd:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+      ai-service:
+        condition: service_started
+    networks:
+      - public
+      - internal
+
+  zipkin:
+    image: openzipkin/zipkin:3
+    ports:
+      - "127.0.0.1:9411:9411"
+    networks:
+      - internal
+
+  apisix-dashboard:
+    image: apache/apisix-dashboard:2.9.0
+    ports:
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - ./services/apisix/dashboard/conf.yaml:/usr/local/apisix-dashboard/conf/conf.yaml
+    depends_on:
+      etcd:
+        condition: service_healthy
+    networks:
+      - internal
+
+networks:
+  public:
+  internal:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  etcd_data:

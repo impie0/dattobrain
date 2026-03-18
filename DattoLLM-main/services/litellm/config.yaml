@@ -1,0 +1,92 @@
+model_list:
+  # ── Anthropic models via OpenRouter ────────────────────────────────────────
+  # Claude models route through OpenRouter (single OPENROUTER_API_KEY).
+  # The Anthropic SDK points at LiteLLM /v1/messages which routes here.
+  # To switch back to direct Anthropic API, replace the blocks below with
+  # the commented "Direct Anthropic" block at the bottom of this file.
+
+  - model_name: claude-opus-4-6
+    litellm_params:
+      model: openrouter/anthropic/claude-opus-4.6
+      api_key: os.environ/OPENROUTER_API_KEY
+      extra_headers:
+        HTTP-Referer: https://datto-rmm-ai
+        X-Title: Datto RMM AI
+
+  - model_name: claude-haiku-4-5-20251001
+    litellm_params:
+      model: openrouter/anthropic/claude-haiku-4.5
+      api_key: os.environ/OPENROUTER_API_KEY
+      extra_headers:
+        HTTP-Referer: https://datto-rmm-ai
+        X-Title: Datto RMM AI
+
+  - model_name: claude-sonnet-4-5
+    litellm_params:
+      model: openrouter/anthropic/claude-sonnet-4.5
+      api_key: os.environ/OPENROUTER_API_KEY
+      extra_headers:
+        HTTP-Referer: https://datto-rmm-ai
+        X-Title: Datto RMM AI
+
+  # ── Non-Anthropic synthesizer models — OpenRouter ─────────────────────────
+  # Set OPENROUTER_API_KEY in .env to use these.
+  # To switch back to direct provider keys, swap the block below with
+  # the "Direct providers" block that follows it.
+
+  - model_name: deepseek/deepseek-r1
+    litellm_params:
+      model: openrouter/deepseek/deepseek-r1
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  - model_name: deepseek/deepseek-chat
+    litellm_params:
+      model: openrouter/deepseek/deepseek-chat
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  - model_name: gemini/gemini-2.0-flash
+    litellm_params:
+      model: openrouter/google/gemini-2.0-flash-001
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  # ── Anthropic models — Direct (fallback if you have Anthropic credits) ─────
+  # Uncomment and remove the OpenRouter Claude block above to use direct API.
+
+  # - model_name: claude-opus-4-6
+  #   litellm_params:
+  #     model: anthropic/claude-opus-4-6
+  #     api_key: os.environ/ANTHROPIC_API_KEY
+
+  # - model_name: claude-haiku-4-5-20251001
+  #   litellm_params:
+  #     model: anthropic/claude-haiku-4-5-20251001
+  #     api_key: os.environ/ANTHROPIC_API_KEY
+
+  # - model_name: claude-sonnet-4-5
+  #   litellm_params:
+  #     model: anthropic/claude-sonnet-4-5
+  #     api_key: os.environ/ANTHROPIC_API_KEY
+
+  # ── Non-Anthropic synthesizer models — Direct providers (fallback) ─────────
+  # Uncomment and remove the OpenRouter block above to go back to
+  # individual DEEPSEEK_API_KEY and GEMINI_API_KEY.
+
+  # - model_name: deepseek/deepseek-r1
+  #   litellm_params:
+  #     model: deepseek/deepseek-reasoner
+  #     api_key: os.environ/DEEPSEEK_API_KEY
+
+  # - model_name: deepseek/deepseek-chat
+  #   litellm_params:
+  #     model: deepseek/deepseek-chat
+  #     api_key: os.environ/DEEPSEEK_API_KEY
+
+  # - model_name: gemini/gemini-2.0-flash
+  #   litellm_params:
+  #     model: gemini/gemini-2.0-flash
+  #     api_key: os.environ/GEMINI_API_KEY
+
+litellm_settings:
+  drop_params: true       # silently drop unsupported params per provider
+  request_timeout: 120
+  num_retries: 2

@@ -1,0 +1,22 @@
+# Secrets — never commit
+.env
+
+# Node
+node_modules/
+dist/
+build/
+.next/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code local files
+.claude/
+
+# Docker volumes / local data
+postgres_data/
