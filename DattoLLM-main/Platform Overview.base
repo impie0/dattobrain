@@ -1,0 +1,22 @@
+filters: file.inFolder("DattoLLM-main")
+properties:
+  type:
+    displayName: Node Type
+  description:
+    displayName: Description
+views:
+  - type: table
+    name: All Nodes
+    groupBy:
+      property: type
+      direction: ASC
+    order:
+      - file.name
+      - type
+      - description
+  - type: cards
+    name: By Type
+    order:
+      - file.name
+      - type
+      - description

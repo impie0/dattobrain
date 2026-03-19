@@ -8,7 +8,7 @@ import {
   generateRefreshToken,
   hashRefreshToken,
 } from "./tokens.js";
-import { trackJti, revokeJti, revokeAllForUser } from "./redis.js";
+import { trackJti, revokeJti, revokeAllForUser, getRedis } from "./redis.js";
 
 function log(level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) {
   const line = JSON.stringify({ level, msg, ts: Date.now(), ...extra });
@@ -113,7 +113,19 @@ export async function handleLegacyVerify(req: Request, res: Response): Promise<v
   }
   const token = authHeader.slice(7);
   try {
-    const payload = verifyAccessToken(token) as { sub: string; role: string };
+    const payload = verifyAccessToken(token) as { sub: string; role: string; jti?: string };
+    // SEC-002: Check JTI revocation — same check as handleIntrospect
+    const jti = payload.jti;
+    if (jti) {
+      const redis = getRedis();
+      if (redis) {
+        const revoked = await redis.exists(`revoked_jtis:${jti}`).catch(() => 0);
+        if (revoked) {
+          res.status(401).json({ valid: false, error: "token_revoked" });
+          return;
+        }
+      }
+    }
     res.json({ valid: true, sub: payload.sub, role: payload.role });
   } catch {
     res.status(401).json({ valid: false });
@@ -309,7 +321,22 @@ export async function handleIntrospect(req: Request, res: Response): Promise<voi
       sub: string;
       roles: string[];
       allowed_tools: string[];
+      jti?: string;
     };
+
+    // SEC-002: Check JTI revocation in Redis — defense-in-depth even after APISIX check
+    const jti = payload.jti;
+    if (jti) {
+      const redis = getRedis();
+      if (redis) {
+        const revoked = await redis.exists(`revoked_jtis:${jti}`).catch(() => 0);
+        if (revoked) {
+          res.status(401).json({ valid: false, error: "token_revoked" });
+          return;
+        }
+      }
+    }
+
     res.json({
       valid: true,
       user_id: payload.sub,

@@ -14,7 +14,6 @@ import {
   selectOrchestratorModel,
   selectSynthesizerModel,
   checkHighRiskInScope,
-  checkToolHighRisk,
 } from "./llmConfig.js";
 import { llmClient, synthesizeStream } from "./modelRouter.js";
 
@@ -39,6 +38,9 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
   const allowedToolsStr = req.headers["x-allowed-tools"] as string | undefined;
   const sessionId = (req.headers["x-session-id"] as string | undefined) ?? randomUUID();
   const { message } = req.body as { message?: string };
+  // SEC-MCP-001: Extract JWT so the MCP bridge can independently verify permissions
+  const authHeader = req.headers["authorization"] as string | undefined;
+  const jwtToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
 
   if (!userId || !allowedToolsStr || !message) {
     res.status(400).json({ error: "missing_fields", message: "x-user-id, x-allowed-tools headers and message body required" });
@@ -111,7 +113,11 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
     const orchestratorModel = selectOrchestratorModel(routingConfig, highRiskInScope);
 
     const toolsUsed: string[] = [];
-    let highRiskToolCalled = false;
+    // SEC-Routing-001: highRiskInScope is used for BOTH orchestrator and synthesizer model
+    // selection so the routing is consistent. Previously synthesizer used per-call
+    // checkToolHighRisk (execution-based) while orchestrator was scope-based — now both
+    // are scope-based: if any high-risk tool is in the user's allowed set, the platform
+    // uses high-risk models throughout the entire request.
     let totalToolResultLength = 0;
     let fullStage1Content = "";
 
@@ -183,19 +189,15 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
           try {
             resultText = await executeCachedTool(toolName, toolInput, pool);
           } catch {
-            const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId);
+            const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken);
             resultText = typeof liveResult.result === "string" ? liveResult.result : JSON.stringify(liveResult.result);
           }
         } else {
-          const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId);
+          const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken);
           resultText = typeof liveResult.result === "string" ? liveResult.result : JSON.stringify(liveResult.result);
         }
 
         totalToolResultLength += resultText.length;
-        if (!highRiskToolCalled) {
-          highRiskToolCalled = await checkToolHighRisk(toolName, pool);
-        }
-
         writeToolCall(res, toolName, "done");
 
         conversationMessages.push({
@@ -221,7 +223,7 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
 
     if (toolsUsed.length > 0) {
       synthModel = selectSynthesizerModel(routingConfig, {
-        highRiskToolCalled,
+        highRiskToolCalled: highRiskInScope,
         dataMode,
         totalToolResultLength,
       });

@@ -560,6 +560,111 @@ export async function getBrowserAlerts(params: { resolved?: string; siteUid?: st
   return browserGet("alerts", params as Record<string, string | number | undefined>) as Promise<{ alerts: BrowserAlert[]; total: number; page: number; pageSize: number }>;
 }
 
+// ── Observability ───────────────────────────────────────────────────────────
+
+export interface ObsSeries { t: string; v: number }
+
+export interface ObsOverview {
+  requests:       { last5m: number; last1h: number; last24h: number };
+  activeSessions: number;
+  tokens:         { last24h: number; avg: number };
+  toolCalls:      { last5m: number; last1h: number };
+  errors:         { last1h: number; last24h: number };
+  cacheMode:      Record<string, number>;
+  series: {
+    requests:  ObsSeries[];
+    toolCalls: ObsSeries[];
+    errors:    ObsSeries[];
+  };
+}
+
+export interface ObsLlmRow {
+  id: string; created_at: string;
+  orchestrator_model: string | null; synthesizer_model: string | null;
+  tools_called: string[]; username: string | null; tokens: number | null;
+}
+export interface ObsLlm {
+  summary:      { total: number; total24h: number };
+  byOrchModel:  { model: string; count: number }[];
+  bySynthModel: { model: string; count: number }[];
+  tokenSeries:  ObsSeries[];
+  recent:       ObsLlmRow[];
+}
+
+export interface ObsToolRow {
+  id: string; tool_name: string | null; event_type: string;
+  created_at: string; metadata: Record<string, unknown>; username: string | null;
+}
+export interface ObsTools {
+  topTools:   { tool_name: string; calls: number; errors: number; error_rate: number }[];
+  callSeries: ObsSeries[];
+  recent:     ObsToolRow[];
+}
+
+export interface ObsMcpErrorRow {
+  tool_name: string | null; event_type: string; created_at: string;
+  metadata: Record<string, unknown>; username: string | null;
+}
+export interface ObsMcp {
+  health:       { status: string; checked_at: string };
+  stats:        { calls1h: number; calls5m: number; errors1h: number; denied1h: number; errorRate: number };
+  errSeries:    ObsSeries[];
+  recentErrors: ObsMcpErrorRow[];
+  topDenied:    { tool_name: string; count: number }[];
+}
+
+export interface ObsChatSession {
+  id: string; data_mode: string; updated_at: string;
+  username: string | null; message_count: number;
+}
+export interface ObsChat {
+  summary:        { sessions24h: number; messages24h: number; active15m: number; avgMsgsPerSession: number };
+  msgSeries:      ObsSeries[];
+  activeSessions: ObsChatSession[];
+}
+
+export interface ObsSyncRow {
+  id: string; started_at: string; completed_at: string | null;
+  triggered_by: string; status: string; sites_synced: number;
+  devices_synced: number; alerts_open_synced: number;
+  audit_errors: number; duration_secs: number | null;
+  error: string | null; last_api_error: string | null;
+}
+export interface ObsCache {
+  syncHistory: ObsSyncRow[];
+  modeDistrib: Record<string, number>;
+  tableCounts: { name: string; count: number }[];
+}
+
+async function obsGet(path: string): Promise<unknown> {
+  const token = getToken();
+  if (!token) throw new Error("Not authenticated");
+  const res = await fetch(`${API_BASE}/api/admin/observability/${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`Observability API error: ${res.status}`);
+  return res.json();
+}
+
+export async function getObsOverview(): Promise<ObsOverview> {
+  return obsGet("overview") as Promise<ObsOverview>;
+}
+export async function getObsLlm(): Promise<ObsLlm> {
+  return obsGet("llm") as Promise<ObsLlm>;
+}
+export async function getObsTools(): Promise<ObsTools> {
+  return obsGet("tools") as Promise<ObsTools>;
+}
+export async function getObsMcp(): Promise<ObsMcp> {
+  return obsGet("mcp") as Promise<ObsMcp>;
+}
+export async function getObsChat(): Promise<ObsChat> {
+  return obsGet("chat") as Promise<ObsChat>;
+}
+export async function getObsCache(): Promise<ObsCache> {
+  return obsGet("cache") as Promise<ObsCache>;
+}
+
 export async function rejectRequest(id: string): Promise<void> {
   const token = getToken();
   if (!token) throw new Error("Not authenticated");

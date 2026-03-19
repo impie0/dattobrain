@@ -4,26 +4,35 @@
 # Use the config below as a reference when recreating them in the Dashboard.
 #
 # Upstreams to create in Dashboard → Upstream:
-#   1. auth-service  → http://auth-service:3001
-#   2. ai-service    → http://ai-service:3002
+#   1. auth-service  → http://auth-service:5001
+#   2. ai-service    → http://ai-service:6001
 #   3. web-app       → http://web-app:3000
 #
 # Consumer to create in Dashboard → Consumer:
 #   username: dattoapp
-#   plugin: jwt-auth  key: dattoapp  secret: <your JWT_SECRET>  algorithm: HS256
+#   plugin: jwt-auth  key: dattoapp  algorithm: RS256
+#   public_key: <contents of JWT_PUBLIC_KEY from .env, PEM format>
+#   (RS256 — the auth-service signs with the private key; APISIX verifies with public key only)
 #
 # Routes to create in Dashboard → Route (in this order — most specific first):
-#   /api/auth/*       → auth-service  (no JWT required)
-#   /api/chat         → ai-service    (jwt-auth + serverless-post-function to inject headers)
-#   /api/history      → ai-service    (jwt-auth + serverless-post-function)
-#   /api/history/*    → ai-service    (jwt-auth + serverless-post-function)
-#   /api/tools        → ai-service    (jwt-auth + serverless-post-function)
-#   /api/approvals/*  → ai-service    (jwt-auth + serverless-post-function)
-#   /api/admin/*      → ai-service    (jwt-auth + serverless-post-function)
-#   /api/debug/*      → ai-service    (jwt-auth + serverless-post-function)
+#   /api/auth/*       → auth-service  methods: GET,POST  (no JWT required, rate-limited: 5 req/s burst 10)
+#   /api/chat         → ai-service    methods: POST       (jwt-auth + serverless-post-function)
+#   /api/chat/mode    → ai-service    methods: POST       (jwt-auth + serverless-post-function)
+#   /api/history      → ai-service    methods: GET        (jwt-auth + serverless-post-function)
+#   /api/history/*    → ai-service    methods: GET        (jwt-auth + serverless-post-function)
+#   /api/tools        → ai-service    methods: GET        (jwt-auth + serverless-post-function)
+#   /api/approvals/*  → ai-service    methods: GET,POST   (jwt-auth + serverless-post-function)
+#   /api/proposals/*  → ai-service    methods: GET,POST   (jwt-auth + serverless-post-function)
+#   /api/admin/*      → ai-service    methods: GET,POST,PUT,PATCH,DELETE  (jwt-auth + serverless-post-function)
+#   /api/debug/*      → ai-service    methods: GET        (jwt-auth + serverless-post-function)
+#   /chat             → ai-service    methods: POST       (jwt-auth + serverless-post-function — SSE streaming)
 #   /*                → web-app       (no auth — catch-all)
 #
 # serverless-post-function Lua code (same for all protected routes):
+#   Injects X-User-Id, X-User-Role, X-Allowed-Tools from decoded JWT payload.
+#   SEC-002: Checks JTI revocation in Redis before passing the request downstream.
+#   A revoked JTI returns 401 immediately, even if the JWT signature is valid.
+#
 #   return function(conf, ctx)
 #     local auth = ngx.req.get_headers()["authorization"]
 #     if not auth then return end
@@ -40,9 +49,31 @@
 #     local cjson = require("cjson.safe")
 #     local pl = cjson.decode(dec)
 #     if not pl then return end
+#     -- SEC-002: JTI revocation check
+#     local jti = pl.jti
+#     if jti then
+#       local redis = require("resty.redis")
+#       local red = redis:new()
+#       red:set_timeouts(500, 500, 500)
+#       local ok = red:connect("redis", 6379)
+#       if ok then
+#         local exists = red:exists("revoked_jtis:" .. jti)
+#         red:set_keepalive(10000, 100)
+#         if exists == 1 then
+#           ngx.status = ngx.HTTP_UNAUTHORIZED
+#           ngx.header["Content-Type"] = "application/json"
+#           ngx.say("{\"error\":\"token_revoked\"}")
+#           return ngx.exit(ngx.HTTP_UNAUTHORIZED)
+#         end
+#       end
+#       -- Redis unavailable: allow request (fail-open) and rely on 1h token TTL
+#     end
 #     ngx.req.set_header("X-User-Id", pl.sub or "")
 #     ngx.req.set_header("X-User-Role", pl.role or "")
+#     ngx.req.set_header("X-Allowed-Tools", cjson.encode(pl.allowed_tools or {}))
 #   end
+#
+# One-liner version for Dashboard (escape internal quotes with \"):
 # ---------------------------------------------------------------------------
 
 # Upstreams (internal Docker hostnames)
@@ -63,18 +94,21 @@ upstreams:
     nodes:
       "web-app:3000": 1
 
-# Consumer for JWT verification (secret must match JWT_SECRET used by auth-service)
+# Consumer for JWT verification (RS256 — APISIX verifies with public key, never sees private key)
+# In Dashboard: Consumer → dattoapp → jwt-auth plugin:
+#   key: dattoapp, algorithm: RS256, public_key: <JWT_PUBLIC_KEY PEM>
 consumers:
   - username: dattoapp
     plugins:
       jwt-auth:
         key: dattoapp
-        secret: dev-secret-change-in-production
-        algorithm: HS256
+        algorithm: RS256
+        # public_key: set in Dashboard — copy from JWT_PUBLIC_KEY env var
 
-# Shared inject function: decode JWT and set X-User-Id / X-User-Role headers
-# jwt-auth validates the token; this function decodes the payload manually
-# (ctx.jwt_auth_payload is not reliably available in serverless-post-function)
+# Shared inject function: decode JWT payload → set X-User-Id, X-User-Role, X-Allowed-Tools
+# SEC-002: Also checks revoked_jtis:<jti> in Redis before forwarding.
+# jwt-auth validates RS256 signature + expiry; this function handles identity injection
+# and revocation (ctx.jwt_auth_payload is not reliably available in serverless-post-function)
 
 routes:
   # Auth: login (no JWT), verify — rate-limited to prevent brute-force (SEC-006)
@@ -100,7 +134,7 @@ routes:
       serverless-post-function:
         phase: access
         functions:
-          - "return function(conf, ctx) local auth = ngx.req.get_headers()[\"authorization\"]; if not auth then return end; local token = auth:match(\"Bearer (.+)\"); if not token then return end; local parts = {}; for p in token:gmatch(\"[^%.]+\") do parts[#parts+1] = p end; if #parts < 2 then return end; local b64 = parts[2]:gsub(\"%-\",\"+\"):gsub(\"_\",\"/\"); local pad = 4 - #b64 % 4; if pad < 4 then b64 = b64 .. string.rep(\"=\", pad) end; local dec = ngx.decode_base64(b64); if not dec then return end; local cjson = require(\"cjson.safe\"); local pl = cjson.decode(dec); if not pl then return end; ngx.req.set_header(\"X-User-Id\", pl.sub or \"\"); ngx.req.set_header(\"X-User-Role\", pl.role or \"\") end"
+          - "return function(conf, ctx) local auth = ngx.req.get_headers()[\"authorization\"]; if not auth then return end; local token = auth:match(\"Bearer (.+)\"); if not token then return end; local parts = {}; for p in token:gmatch(\"[^%.]+\") do parts[#parts+1] = p end; if #parts < 2 then return end; local b64 = parts[2]:gsub(\"%-\",\"+\"):gsub(\"_\",\"/\"); local pad = 4 - #b64 % 4; if pad < 4 then b64 = b64 .. string.rep(\"=\", pad) end; local dec = ngx.decode_base64(b64); if not dec then return end; local cjson = require(\"cjson.safe\"); local pl = cjson.decode(dec); if not pl then return end; local jti = pl.jti; if jti then local redis = require(\"resty.redis\"); local red = redis:new(); red:set_timeouts(500, 500, 500); local ok = red:connect(\"redis\", 6379); if ok then local exists = red:exists(\"revoked_jtis:\" .. jti); red:set_keepalive(10000, 100); if exists == 1 then ngx.status = ngx.HTTP_UNAUTHORIZED; ngx.header[\"Content-Type\"] = \"application/json\"; ngx.say(\"{\\\"error\\\":\\\"token_revoked\\\"}\"); return ngx.exit(ngx.HTTP_UNAUTHORIZED) end end end; ngx.req.set_header(\"X-User-Id\", pl.sub or \"\"); ngx.req.set_header(\"X-User-Role\", pl.role or \"\"); ngx.req.set_header(\"X-Allowed-Tools\", cjson.encode(pl.allowed_tools or {})) end"
 
   - uri: /api/history
     upstream_id: 2
@@ -112,7 +146,7 @@ routes:
       serverless-post-function:
         phase: access
         functions:
-          - "return function(conf, ctx) local auth = ngx.req.get_headers()[\"authorization\"]; if not auth then return end; local token = auth:match(\"Bearer (.+)\"); if not token then return end; local parts = {}; for p in token:gmatch(\"[^%.]+\") do parts[#parts+1] = p end; if #parts < 2 then return end; local b64 = parts[2]:gsub(\"%-\",\"+\"):gsub(\"_\",\"/\"); local pad = 4 - #b64 % 4; if pad < 4 then b64 = b64 .. string.rep(\"=\", pad) end; local dec = ngx.decode_base64(b64); if not dec then return end; local cjson = require(\"cjson.safe\"); local pl = cjson.decode(dec); if not pl then return end; ngx.req.set_header(\"X-User-Id\", pl.sub or \"\"); ngx.req.set_header(\"X-User-Role\", pl.role or \"\") end"
+          - "return function(conf, ctx) local auth = ngx.req.get_headers()[\"authorization\"]; if not auth then return end; local token = auth:match(\"Bearer (.+)\"); if not token then return end; local parts = {}; for p in token:gmatch(\"[^%.]+\") do parts[#parts+1] = p end; if #parts < 2 then return end; local b64 = parts[2]:gsub(\"%-\",\"+\"):gsub(\"_\",\"/\"); local pad = 4 - #b64 % 4; if pad < 4 then b64 = b64 .. string.rep(\"=\", pad) end; local dec = ngx.decode_base64(b64); if not dec then return end; local cjson = require(\"cjson.safe\"); local pl = cjson.decode(dec); if not pl then return end; local jti = pl.jti; if jti then local redis = require(\"resty.redis\"); local red = redis:new(); red:set_timeouts(500, 500, 500); local ok = red:connect(\"redis\", 6379); if ok then local exists = red:exists(\"revoked_jtis:\" .. jti); red:set_keepalive(10000, 100); if exists == 1 then ngx.status = ngx.HTTP_UNAUTHORIZED; ngx.header[\"Content-Type\"] = \"application/json\"; ngx.say(\"{\\\"error\\\":\\\"token_revoked\\\"}\"); return ngx.exit(ngx.HTTP_UNAUTHORIZED) end end end; ngx.req.set_header(\"X-User-Id\", pl.sub or \"\"); ngx.req.set_header(\"X-User-Role\", pl.role or \"\"); ngx.req.set_header(\"X-Allowed-Tools\", cjson.encode(pl.allowed_tools or {})) end"
 
   - uri: /api/history/*
     upstream_id: 2
@@ -124,11 +158,11 @@ routes:
       serverless-post-function:
         phase: access
         functions:
-          - "return function(conf, ctx) local auth = ngx.req.get_headers()[\"authorization\"]; if not auth then return end; local token = auth:match(\"Bearer (.+)\"); if not token then return end; local parts = {}; for p in token:gmatch(\"[^%.]+\") do parts[#parts+1] = p end; if #parts < 2 then return end; local b64 = parts[2]:gsub(\"%-\",\"+\"):gsub(\"_\",\"/\"); local pad = 4 - #b64 % 4; if pad < 4 then b64 = b64 .. string.rep(\"=\", pad) end; local dec = ngx.decode_base64(b64); if not dec then return end; local cjson = require(\"cjson.safe\"); local pl = cjson.decode(dec); if not pl then return end; ngx.req.set_header(\"X-User-Id\", pl.sub or \"\"); ngx.req.set_header(\"X-User-Role\", pl.role or \"\") end"
+          - "return function(conf, ctx) local auth = ngx.req.get_headers()[\"authorization\"]; if not auth then return end; local token = auth:match(\"Bearer (.+)\"); if not token then return end; local parts = {}; for p in token:gmatch(\"[^%.]+\") do parts[#parts+1] = p end; if #parts < 2 then return end; local b64 = parts[2]:gsub(\"%-\",\"+\"):gsub(\"_\",\"/\"); local pad = 4 - #b64 % 4; if pad < 4 then b64 = b64 .. string.rep(\"=\", pad) end; local dec = ngx.decode_base64(b64); if not dec then return end; local cjson = require(\"cjson.safe\"); local pl = cjson.decode(dec); if not pl then return end; local jti = pl.jti; if jti then local redis = require(\"resty.redis\"); local red = redis:new(); red:set_timeouts(500, 500, 500); local ok = red:connect(\"redis\", 6379); if ok then local exists = red:exists(\"revoked_jtis:\" .. jti); red:set_keepalive(10000, 100); if exists == 1 then ngx.status = ngx.HTTP_UNAUTHORIZED; ngx.header[\"Content-Type\"] = \"application/json\"; ngx.say(\"{\\\"error\\\":\\\"token_revoked\\\"}\"); return ngx.exit(ngx.HTTP_UNAUTHORIZED) end end end; ngx.req.set_header(\"X-User-Id\", pl.sub or \"\"); ngx.req.set_header(\"X-User-Role\", pl.role or \"\"); ngx.req.set_header(\"X-Allowed-Tools\", cjson.encode(pl.allowed_tools or {})) end"
 
   - uri: /api/admin/*
     upstream_id: 2
-    methods: [GET, POST]
+    methods: [GET, POST, PUT, PATCH, DELETE]
     name: admin-route
     plugins:
       jwt-auth:
@@ -136,7 +170,7 @@ routes:
       serverless-post-function:
         phase: access
         functions:
-          - "return function(conf, ctx) local auth = ngx.req.get_headers()[\"authorization\"]; if not auth then return end; local token = auth:match(\"Bearer (.+)\"); if not token then return end; local parts = {}; for p in token:gmatch(\"[^%.]+\") do parts[#parts+1] = p end; if #parts < 2 then return end; local b64 = parts[2]:gsub(\"%-\",\"+\"):gsub(\"_\",\"/\"); local pad = 4 - #b64 % 4; if pad < 4 then b64 = b64 .. string.rep(\"=\", pad) end; local dec = ngx.decode_base64(b64); if not dec then return end; local cjson = require(\"cjson.safe\"); local pl = cjson.decode(dec); if not pl then return end; ngx.req.set_header(\"X-User-Id\", pl.sub or \"\"); ngx.req.set_header(\"X-User-Role\", pl.role or \"\") end"
+          - "return function(conf, ctx) local auth = ngx.req.get_headers()[\"authorization\"]; if not auth then return end; local token = auth:match(\"Bearer (.+)\"); if not token then return end; local parts = {}; for p in token:gmatch(\"[^%.]+\") do parts[#parts+1] = p end; if #parts < 2 then return end; local b64 = parts[2]:gsub(\"%-\",\"+\"):gsub(\"_\",\"/\"); local pad = 4 - #b64 % 4; if pad < 4 then b64 = b64 .. string.rep(\"=\", pad) end; local dec = ngx.decode_base64(b64); if not dec then return end; local cjson = require(\"cjson.safe\"); local pl = cjson.decode(dec); if not pl then return end; local jti = pl.jti; if jti then local redis = require(\"resty.redis\"); local red = redis:new(); red:set_timeouts(500, 500, 500); local ok = red:connect(\"redis\", 6379); if ok then local exists = red:exists(\"revoked_jtis:\" .. jti); red:set_keepalive(10000, 100); if exists == 1 then ngx.status = ngx.HTTP_UNAUTHORIZED; ngx.header[\"Content-Type\"] = \"application/json\"; ngx.say(\"{\\\"error\\\":\\\"token_revoked\\\"}\"); return ngx.exit(ngx.HTTP_UNAUTHORIZED) end end end; ngx.req.set_header(\"X-User-Id\", pl.sub or \"\"); ngx.req.set_header(\"X-User-Role\", pl.role or \"\"); ngx.req.set_header(\"X-Allowed-Tools\", cjson.encode(pl.allowed_tools or {})) end"
 
   # Debug: trace viewer (last N chat calls — requires login)
   - uri: /api/debug/*
@@ -149,7 +183,56 @@ routes:
       serverless-post-function:
         phase: access
         functions:
-          - "return function(conf, ctx) local auth = ngx.req.get_headers()[\"authorization\"]; if not auth then return end; local token = auth:match(\"Bearer (.+)\"); if not token then return end; local parts = {}; for p in token:gmatch(\"[^%.]+\") do parts[#parts+1] = p end; if #parts < 2 then return end; local b64 = parts[2]:gsub(\"%-\",\"+\"):gsub(\"_\",\"/\"); local pad = 4 - #b64 % 4; if pad < 4 then b64 = b64 .. string.rep(\"=\", pad) end; local dec = ngx.decode_base64(b64); if not dec then return end; local cjson = require(\"cjson.safe\"); local pl = cjson.decode(dec); if not pl then return end; ngx.req.set_header(\"X-User-Id\", pl.sub or \"\"); ngx.req.set_header(\"X-User-Role\", pl.role or \"\") end"
+          - "return function(conf, ctx) local auth = ngx.req.get_headers()[\"authorization\"]; if not auth then return end; local token = auth:match(\"Bearer (.+)\"); if not token then return end; local parts = {}; for p in token:gmatch(\"[^%.]+\") do parts[#parts+1] = p end; if #parts < 2 then return end; local b64 = parts[2]:gsub(\"%-\",\"+\"):gsub(\"_\",\"/\"); local pad = 4 - #b64 % 4; if pad < 4 then b64 = b64 .. string.rep(\"=\", pad) end; local dec = ngx.decode_base64(b64); if not dec then return end; local cjson = require(\"cjson.safe\"); local pl = cjson.decode(dec); if not pl then return end; local jti = pl.jti; if jti then local redis = require(\"resty.redis\"); local red = redis:new(); red:set_timeouts(500, 500, 500); local ok = red:connect(\"redis\", 6379); if ok then local exists = red:exists(\"revoked_jtis:\" .. jti); red:set_keepalive(10000, 100); if exists == 1 then ngx.status = ngx.HTTP_UNAUTHORIZED; ngx.header[\"Content-Type\"] = \"application/json\"; ngx.say(\"{\\\"error\\\":\\\"token_revoked\\\"}\"); return ngx.exit(ngx.HTTP_UNAUTHORIZED) end end end; ngx.req.set_header(\"X-User-Id\", pl.sub or \"\"); ngx.req.set_header(\"X-User-Role\", pl.role or \"\"); ngx.req.set_header(\"X-Allowed-Tools\", cjson.encode(pl.allowed_tools or {})) end"
+
+  - uri: /api/tools
+    upstream_id: 2
+    methods: [GET]
+    name: tools-route
+    plugins:
+      jwt-auth:
+        header: authorization
+      serverless-post-function:
+        phase: access
+        functions:
+          - "return function(conf, ctx) local auth = ngx.req.get_headers()[\"authorization\"]; if not auth then return end; local token = auth:match(\"Bearer (.+)\"); if not token then return end; local parts = {}; for p in token:gmatch(\"[^%.]+\") do parts[#parts+1] = p end; if #parts < 2 then return end; local b64 = parts[2]:gsub(\"%-\",\"+\"):gsub(\"_\",\"/\"); local pad = 4 - #b64 % 4; if pad < 4 then b64 = b64 .. string.rep(\"=\", pad) end; local dec = ngx.decode_base64(b64); if not dec then return end; local cjson = require(\"cjson.safe\"); local pl = cjson.decode(dec); if not pl then return end; local jti = pl.jti; if jti then local redis = require(\"resty.redis\"); local red = redis:new(); red:set_timeouts(500, 500, 500); local ok = red:connect(\"redis\", 6379); if ok then local exists = red:exists(\"revoked_jtis:\" .. jti); red:set_keepalive(10000, 100); if exists == 1 then ngx.status = ngx.HTTP_UNAUTHORIZED; ngx.header[\"Content-Type\"] = \"application/json\"; ngx.say(\"{\\\"error\\\":\\\"token_revoked\\\"}\"); return ngx.exit(ngx.HTTP_UNAUTHORIZED) end end end; ngx.req.set_header(\"X-User-Id\", pl.sub or \"\"); ngx.req.set_header(\"X-User-Role\", pl.role or \"\"); ngx.req.set_header(\"X-Allowed-Tools\", cjson.encode(pl.allowed_tools or {})) end"
+
+  - uri: /api/approvals/*
+    upstream_id: 2
+    methods: [GET, POST]
+    name: approvals-route
+    plugins:
+      jwt-auth:
+        header: authorization
+      serverless-post-function:
+        phase: access
+        functions:
+          - "return function(conf, ctx) local auth = ngx.req.get_headers()[\"authorization\"]; if not auth then return end; local token = auth:match(\"Bearer (.+)\"); if not token then return end; local parts = {}; for p in token:gmatch(\"[^%.]+\") do parts[#parts+1] = p end; if #parts < 2 then return end; local b64 = parts[2]:gsub(\"%-\",\"+\"):gsub(\"_\",\"/\"); local pad = 4 - #b64 % 4; if pad < 4 then b64 = b64 .. string.rep(\"=\", pad) end; local dec = ngx.decode_base64(b64); if not dec then return end; local cjson = require(\"cjson.safe\"); local pl = cjson.decode(dec); if not pl then return end; local jti = pl.jti; if jti then local redis = require(\"resty.redis\"); local red = redis:new(); red:set_timeouts(500, 500, 500); local ok = red:connect(\"redis\", 6379); if ok then local exists = red:exists(\"revoked_jtis:\" .. jti); red:set_keepalive(10000, 100); if exists == 1 then ngx.status = ngx.HTTP_UNAUTHORIZED; ngx.header[\"Content-Type\"] = \"application/json\"; ngx.say(\"{\\\"error\\\":\\\"token_revoked\\\"}\"); return ngx.exit(ngx.HTTP_UNAUTHORIZED) end end end; ngx.req.set_header(\"X-User-Id\", pl.sub or \"\"); ngx.req.set_header(\"X-User-Role\", pl.role or \"\"); ngx.req.set_header(\"X-Allowed-Tools\", cjson.encode(pl.allowed_tools or {})) end"
+
+  - uri: /api/proposals/*
+    upstream_id: 2
+    methods: [GET, POST]
+    name: proposals-route
+    plugins:
+      jwt-auth:
+        header: authorization
+      serverless-post-function:
+        phase: access
+        functions:
+          - "return function(conf, ctx) local auth = ngx.req.get_headers()[\"authorization\"]; if not auth then return end; local token = auth:match(\"Bearer (.+)\"); if not token then return end; local parts = {}; for p in token:gmatch(\"[^%.]+\") do parts[#parts+1] = p end; if #parts < 2 then return end; local b64 = parts[2]:gsub(\"%-\",\"+\"):gsub(\"_\",\"/\"); local pad = 4 - #b64 % 4; if pad < 4 then b64 = b64 .. string.rep(\"=\", pad) end; local dec = ngx.decode_base64(b64); if not dec then return end; local cjson = require(\"cjson.safe\"); local pl = cjson.decode(dec); if not pl then return end; local jti = pl.jti; if jti then local redis = require(\"resty.redis\"); local red = redis:new(); red:set_timeouts(500, 500, 500); local ok = red:connect(\"redis\", 6379); if ok then local exists = red:exists(\"revoked_jtis:\" .. jti); red:set_keepalive(10000, 100); if exists == 1 then ngx.status = ngx.HTTP_UNAUTHORIZED; ngx.header[\"Content-Type\"] = \"application/json\"; ngx.say(\"{\\\"error\\\":\\\"token_revoked\\\"}\"); return ngx.exit(ngx.HTTP_UNAUTHORIZED) end end end; ngx.req.set_header(\"X-User-Id\", pl.sub or \"\"); ngx.req.set_header(\"X-User-Role\", pl.role or \"\"); ngx.req.set_header(\"X-Allowed-Tools\", cjson.encode(pl.allowed_tools or {})) end"
+
+  # SSE streaming chat endpoint
+  - uri: /chat
+    upstream_id: 2
+    methods: [POST]
+    name: chat-sse-route
+    plugins:
+      jwt-auth:
+        header: authorization
+      serverless-post-function:
+        phase: access
+        functions:
+          - "return function(conf, ctx) local auth = ngx.req.get_headers()[\"authorization\"]; if not auth then return end; local token = auth:match(\"Bearer (.+)\"); if not token then return end; local parts = {}; for p in token:gmatch(\"[^%.]+\") do parts[#parts+1] = p end; if #parts < 2 then return end; local b64 = parts[2]:gsub(\"%-\",\"+\"):gsub(\"_\",\"/\"); local pad = 4 - #b64 % 4; if pad < 4 then b64 = b64 .. string.rep(\"=\", pad) end; local dec = ngx.decode_base64(b64); if not dec then return end; local cjson = require(\"cjson.safe\"); local pl = cjson.decode(dec); if not pl then return end; local jti = pl.jti; if jti then local redis = require(\"resty.redis\"); local red = redis:new(); red:set_timeouts(500, 500, 500); local ok = red:connect(\"redis\", 6379); if ok then local exists = red:exists(\"revoked_jtis:\" .. jti); red:set_keepalive(10000, 100); if exists == 1 then ngx.status = ngx.HTTP_UNAUTHORIZED; ngx.header[\"Content-Type\"] = \"application/json\"; ngx.say(\"{\\\"error\\\":\\\"token_revoked\\\"}\"); return ngx.exit(ngx.HTTP_UNAUTHORIZED) end end end; ngx.req.set_header(\"X-User-Id\", pl.sub or \"\"); ngx.req.set_header(\"X-User-Role\", pl.role or \"\"); ngx.req.set_header(\"X-Allowed-Tools\", cjson.encode(pl.allowed_tools or {})) end"
 
   # Web app (Next.js) — catch-all
   - uri: /*

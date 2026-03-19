@@ -1,0 +1,222 @@
+{
+  "main": {
+    "id": "066e64bc2efb21a0",
+    "type": "split",
+    "children": [
+      {
+        "id": "ebe6f0cf6b540667",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "d76661bd31ca59e6",
+            "type": "leaf",
+            "state": {
+              "type": "canvas",
+              "state": {
+                "file": "DattoLLM-main/Architecture.canvas",
+                "viewState": {
+                  "x": 365,
+                  "y": 249.5625,
+                  "zoom": 0
+                }
+              },
+              "icon": "lucide-layout-dashboard",
+              "title": "Architecture"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "de56fd015eaddc56",
+    "type": "split",
+    "children": [
+      {
+        "id": "40aa5c6a9fa10440",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "8c82a9b5c26ae35e",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "89d78e73afe33917",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "02215c64539d3c2b",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "fb7b2d781f0b7b95",
+    "type": "split",
+    "children": [
+      {
+        "id": "b5ce84d391d018a0",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "02b4ab8e98fcb7f5",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "DattoLLM-main/Architecture.canvas",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for Architecture"
+            }
+          },
+          {
+            "id": "016664a06780cdae",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "DattoLLM-main/Architecture.canvas",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from Architecture"
+            }
+          },
+          {
+            "id": "8825421932175dbb",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "7259af2209b0a0c8",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "46844e2e8b68b143",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "DattoLLM-main/Architecture.canvas",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline of Architecture"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "d76661bd31ca59e6",
+  "lastOpenFiles": [
+    "DattoLLM-main/auth-service/src/handlers.ts.tmp.77464.1773878028522",
+    "DattoLLM-main/auth-service/src/handlers.ts.tmp.77464.1773878019117",
+    "DattoLLM-main/claude.md.tmp.77464.1773877776612",
+    "DattoLLM-main/claude.md.tmp.77464.1773877767261",
+    "DattoLLM-main/docker-compose.yml.tmp.77464.1773877758916",
+    "DattoLLM-main/services/apisix/apisix.yaml.tmp.77464.1773877749180",
+    "DattoLLM-main/services/apisix/apisix.yaml.tmp.77464.1773877724661",
+    "DattoLLM-main/services/apisix/apisix.yaml.tmp.77464.1773877719912",
+    "DattoLLM-main/claude.md.tmp.78344.1773877584649",
+    "DattoLLM-main/claude.md.tmp.78344.1773877579366",
+    "DattoLLM-main/claude.md.tmp.78344.1773877569264",
+    "DattoLLM-main/connections/MCP Server to Datto.md",
+    "DattoLLM-main/connections/Auth to PostgreSQL.md",
+    "DattoLLM-main/connections/MCP Bridge to MCP Server.md",
+    "DattoLLM-main/connections/AI to PostgreSQL.md",
+    "DattoLLM-main/connections/AI to Embedding.md",
+    "DattoLLM-main/connections/AI to MCP Bridge.md",
+    "DattoLLM-main/connections/Gateway to WebApp.md",
+    "DattoLLM-main/connections/Gateway to AI.md",
+    "DattoLLM-main/connections/Gateway to Auth.md",
+    "DattoLLM-main/connections/Browser to Gateway.md",
+    "DattoLLM-main/ARCHITECTURE.md",
+    "CLAUDE.md",
+    "DattoLLM-main/SECURITY_FINDINGS.md",
+    "DattoLLM-main/ROADMAP.md",
+    "DattoLLM-main/Write Tool State Machine.md",
+    "DattoLLM-main/Architecture.canvas",
+    "DattoLLM-main/Home.md",
+    "DattoLLM-main/Prompt Builder.md",
+    "AGENTS.md"
+  ]
+}

@@ -6,12 +6,24 @@ function log(level: "info" | "warn" | "error", msg: string, extra?: Record<strin
   else process.stdout.write(line + "\n");
 }
 
+/**
+ * Call a tool via the MCP bridge.
+ *
+ * Passes the user's JWT token so the bridge can independently verify
+ * permissions against auth-service (SEC-MCP-001 — bridge does not trust
+ * caller-supplied allowedTools; it re-derives them from the token).
+ *
+ * The legacy `allowedTools` parameter is still sent for internal-service
+ * callers (sync scheduler) that use X-Internal-Secret bypass, but is
+ * ignored by the bridge for user requests.
+ */
 export async function callTool(
   toolName: string,
   toolArgs: Record<string, unknown>,
   allowedTools: string[],
   requestId: string,
-  userId?: string
+  userId?: string,
+  jwtToken?: string,
 ): Promise<{ success: boolean; isError?: boolean; result: unknown }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 35_000);
@@ -20,11 +32,24 @@ export async function callTool(
     const res = await fetch(process.env["MCP_BRIDGE_URL"]! + "/tool-call", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ toolName, toolArgs, requestId, allowedTools }),
+      body: JSON.stringify({ toolName, toolArgs, requestId, allowedTools, jwtToken }),
       signal: controller.signal,
     });
 
     clearTimeout(timeout);
+
+    if (res.status === 401) {
+      log("warn", "tool_call_unauthorized", { toolName, requestId });
+      pool.query(
+        "INSERT INTO audit_logs (user_id, event_type, tool_name) VALUES ($1, $2, $3)",
+        [userId ?? null, "tool_unauthorized", toolName]
+      ).catch(() => {});
+      return {
+        success: false,
+        isError: true,
+        result: { content: [{ type: "text", text: `Tool '${toolName}' permission check failed.` }] },
+      };
+    }
 
     if (res.status === 403) {
       log("warn", "tool_denied", { toolName, requestId });

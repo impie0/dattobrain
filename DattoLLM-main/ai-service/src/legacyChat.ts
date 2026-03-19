@@ -12,7 +12,6 @@ import {
   selectOrchestratorModel,
   selectSynthesizerModel,
   checkHighRiskInScope,
-  checkToolHighRisk,
 } from "./llmConfig.js";
 import { llmClient, synthesize } from "./modelRouter.js";
 
@@ -28,6 +27,9 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
   const allowedToolsHeader = req.headers["x-allowed-tools"] as string | undefined;
   const sessionId = (req.headers["x-session-id"] as string | undefined) ?? randomUUID();
   const { question, message } = req.body as { question?: string; message?: string };
+  // SEC-MCP-001: Extract JWT so the MCP bridge can independently verify permissions
+  const authHeader = req.headers["authorization"] as string | undefined;
+  const jwtToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
 
   const text = question ?? message;
   if (!text) {
@@ -90,7 +92,7 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
     const orchestratorModel = selectOrchestratorModel(routingConfig, highRiskInScope);
 
     const toolsUsed: string[] = [];
-    let highRiskToolCalled = false;
+    // SEC-Routing-001: scope-based high-risk routing for both stages (consistent with chat.ts)
     let totalToolResultLength = 0;
     let fullStage1Content = "";
 
@@ -144,18 +146,15 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
           try {
             resultText = await executeCachedTool(toolName, toolInput, pool);
           } catch {
-            const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId);
+            const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken);
             resultText = typeof liveResult.result === "string" ? liveResult.result : JSON.stringify(liveResult.result);
           }
         } else {
-          const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId);
+          const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken);
           resultText = typeof liveResult.result === "string" ? liveResult.result : JSON.stringify(liveResult.result);
         }
 
         totalToolResultLength += resultText.length;
-        if (!highRiskToolCalled) {
-          highRiskToolCalled = await checkToolHighRisk(toolName, pool);
-        }
 
         conversationMessages.push({
           role: "tool",
@@ -180,7 +179,7 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
 
     if (toolsUsed.length > 0) {
       synthModel = selectSynthesizerModel(routingConfig, {
-        highRiskToolCalled,
+        highRiskToolCalled: highRiskInScope,
         dataMode,
         totalToolResultLength,
       });

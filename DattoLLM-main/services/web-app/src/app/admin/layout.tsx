@@ -12,6 +12,7 @@ const navLinks = [
   { href: "/admin/data-sync", label: "Data Sync" },
   { href: "/admin/explorer", label: "Explorer" },
   { href: "/admin/llm-config", label: "LLM Config" },
+  { href: "/admin/observability", label: "Observability" },
 ];
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {

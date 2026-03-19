@@ -44,6 +44,12 @@ description: Next.js frontend serving chat, history, approvals, and admin panel 
 | `/admin/explorer/devices` | Filtered/paginated devices list |
 | `/admin/explorer/devices/[uid]` | Device detail — Overview, Hardware Audit, Software, Alerts tabs |
 | `/admin/explorer/alerts` | Alerts browser — open/resolved toggle, priority filter |
+| `/admin/observability` | [[Observability Dashboard]] overview — metric cards, 24h charts, drill-down links |
+| `/admin/observability/llm` | LLM/Tokens — token chart, model breakdown, last 100 requests |
+| `/admin/observability/tools` | Tool Calls — usage frequency, error rates, last 100 events |
+| `/admin/observability/mcp` | MCP Server — bridge health, denied calls, error timeline |
+| `/admin/observability/chat` | Chat/Usage — message volume, active sessions table |
+| `/admin/observability/cache` | Cache — sync history, record counts, cached/live ratio |
 
 ## API Client
 
@@ -51,4 +57,4 @@ description: Next.js frontend serving chat, history, approvals, and admin panel 
 
 ## Related Nodes
 
-[[API Gateway]] · [[Auth Service]] · [[AI Service]] · [[Authentication Flow]]
+[[API Gateway]] · [[Auth Service]] · [[AI Service]] · [[Authentication Flow]] · [[Observability Dashboard]]

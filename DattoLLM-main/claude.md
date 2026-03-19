@@ -1,6 +1,6 @@
 # Datto RMM AI Platform — Second Brain
 
-> **Obsidian Knowledge Graph** | Version 2.0.0 | 2026-03-18
+> **Obsidian Knowledge Graph** | Version 2.3.0 | 2026-03-19
 > Navigate this file like a graph. Every `[[Node]]` is a clickable link to a section or sibling note.
 
 ---
@@ -108,11 +108,15 @@ graph TD
   - `X-User-Id: <sub>`
   - `X-User-Role: <role>`
   - `X-Allowed-Tools: <json array>`
+- SEC-002: JTI revocation check — Lua queries `EXISTS revoked_jtis:<jti>` in Redis before passing the request downstream. Revoked tokens receive 401 immediately, even if the RS256 signature is still valid.
 - Routes: `/api/auth/*` (no JWT), all others require Bearer token
 
-**Lua injection snippet (all protected routes):**
+**Lua snippet (condensed — see apisix.yaml for full one-liner):**
 ```lua
-local pl = cjson.decode(ngx.decode_base64(jwt_payload_part))
+-- After JWT decode:
+if jti and redis.exists("revoked_jtis:" .. jti) == 1 then
+  return ngx.exit(401)  -- SEC-002: token revoked
+end
 ngx.req.set_header("X-User-Id", pl.sub or "")
 ngx.req.set_header("X-User-Role", pl.role or "")
 ngx.req.set_header("X-Allowed-Tools", cjson.encode(pl.allowed_tools or {}))
@@ -141,7 +145,7 @@ ngx.req.set_header("X-Allowed-Tools", cjson.encode(pl.allowed_tools or {}))
 | `handleLegacyLogin` | `POST /api/auth/login` | Web-app compat: `{username,password}` → `{token}` |
 | `handleLogin` | `POST /auth/login` | Platform: `{email,password}` → `{access_token, refresh_token}` |
 | `handleRefresh` | `POST /auth/refresh` | Renew access token, re-query tool permissions |
-| `handleIntrospect` | `GET /auth/introspect` | Validate token, return claims |
+| `handleIntrospect` | `GET /auth/introspect` | Validate token + JTI revocation check, return claims |
 | `handleLegacyVerify` | `GET /api/auth/verify` | APISIX compat token check |
 
 **Token signing (file: `auth-service/src/tokens.ts`):**
@@ -218,8 +222,10 @@ ngx.req.set_header("X-Allowed-Tools", cjson.encode(pl.allowed_tools or {}))
 | `src/sync.ts` | [[Local Data Cache]] sync pipeline — rate-limited MCP calls → upsert cache tables |
 | `src/cachedQueries.ts` | SQL query handlers for all 28 cacheable tools |
 | `src/dataBrowser.ts` | [[Data Explorer]] REST handlers — read-only SQL queries against cache tables for the admin browser UI |
+| `src/observability.ts` | [[Observability Dashboard]] — 6 admin endpoints aggregating metrics from audit_logs, llm_request_logs, chat_messages, chat_sessions, datto_sync_log |
+| `src/actionProposals.ts` | [[ActionProposal]] state machine — stage/list/confirm/reject/execute write tool proposals (SEC-Write-001) |
 
-**Related nodes:** [[Prompt Builder]] · [[Tool Router]] · [[MCP Bridge]] · [[Chat Request Flow]] · [[Tool Execution Flow]] · [[Chat Messages Table]] · [[RBAC System]] · [[Local Data Cache]]
+**Related nodes:** [[Prompt Builder]] · [[Tool Router]] · [[MCP Bridge]] · [[Chat Request Flow]] · [[Tool Execution Flow]] · [[Chat Messages Table]] · [[RBAC System]] · [[Local Data Cache]] · [[Observability Dashboard]]
 
 ---
 
@@ -239,9 +245,17 @@ ngx.req.set_header("X-Allowed-Tools", cjson.encode(pl.allowed_tools or {}))
 
 | Function | File | Purpose |
 |---|---|---|
-| `POST /tool-call` | `index.ts` | Validate fields → `checkPermission` → `callMcpTool` |
-| `checkPermission` | `validate.ts` | Returns 403 if `toolName` not in `allowedTools` |
+| `POST /tool-call` | `index.ts` | Validate fields → `resolveAllowedTools` → `checkPermission` → `callMcpTool` |
+| `resolveAllowedTools` | `index.ts` | SEC-MCP-001: Verify permissions independently (see below) |
+| `checkPermission` | `validate.ts` | Returns 403 if `toolName` not in DB-sourced `allowedTools` |
 | `callMcpTool` | `mcpClient.ts` | POST JSON-RPC to MCP Server, retry 3× on 503 |
+
+**SEC-MCP-001 — Independent permission verification:**
+The bridge does NOT trust the `allowedTools` array supplied by the AI container in the request body. Instead:
+- **Internal service path** (e.g. sync scheduler): `X-Internal-Secret` header matches `MCP_INTERNAL_SECRET` → caller is trusted, supplied `allowedTools` accepted.
+- **User request path**: bridge receives `jwtToken` from request body, calls `AUTH_SERVICE_URL/auth/introspect`, and uses the DB-sourced `allowed_tools` from that response. A compromised AI container cannot forge permissions by sending a different `allowedTools` array.
+
+**New env var:** `AUTH_SERVICE_URL` (required) — `http://auth-service:5001`
 
 **Retry policy (`mcpClient.ts`):**
 - 401 → throw immediately
@@ -311,7 +325,7 @@ ngx.req.set_header("X-Allowed-Tools", cjson.encode(pl.allowed_tools or {}))
 
 **Purpose:** Internal-only LLM proxy. Routes calls to Anthropic, DeepSeek, and Gemini without changing any application code. Enables admin-panel model swaps.
 
-**Image:** `ghcr.io/berriai/litellm:main-latest`
+**Image:** `ghcr.io/berriai/litellm:v1.82.3-stable`
 **Port:** `4000` (internal only)
 **Key env vars:** `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY` (optional), `GEMINI_API_KEY` (optional), `LITELLM_MASTER_KEY` (optional)
 **Config file:** `services/litellm/config.yaml`
@@ -421,6 +435,12 @@ ngx.req.set_header("X-Allowed-Tools", cjson.encode(pl.allowed_tools or {}))
 | `/admin/explorer/devices` | Filtered/paginated devices list (hostname, status, type) |
 | `/admin/explorer/devices/[uid]` | Device detail — Overview, Hardware Audit, Software, Alerts tabs |
 | `/admin/explorer/alerts` | Alerts browser — open/resolved toggle, priority filter, message search |
+| `/admin/observability` | [[Observability Dashboard]] overview — metric cards, 24h charts, drill-down links |
+| `/admin/observability/llm` | LLM/Tokens — token chart, model breakdown, last 100 requests |
+| `/admin/observability/tools` | Tool Calls — usage frequency, error rates, last 100 events |
+| `/admin/observability/mcp` | MCP Server — bridge health, denied calls, error timeline |
+| `/admin/observability/chat` | Chat/Usage — message volume, active sessions table |
+| `/admin/observability/cache` | Cache — sync history, record counts per table, cached/live ratio |
 
 **API client:** `src/lib/api.ts` — all fetch calls, Bearer token from `document.cookie` (`token=...`)
 
@@ -561,13 +581,14 @@ sequenceDiagram
     end
 ```
 
-**Three-layer permission model:**
+**Four-layer permission model:**
 
 | Layer | Where | What it stops |
 |---|---|---|
 | **1 — Prompt** | [[Prompt Builder]] | Model never sees definitions of unauthorised tools |
-| **2 — Bridge gate** | [[MCP Bridge]] `validate.ts` | 403 on any tool not in `allowedTools` |
+| **2 — Bridge gate (DB-verified)** | [[MCP Bridge]] `index.ts` | Calls auth-service introspect to get DB-sourced allowed_tools; ignores caller-supplied list (SEC-MCP-001) |
 | **3 — MCP registry** | [[MCP Server]] | `Unknown tool: x` error for unregistered names |
+| **4 — Write gate** | [[ActionProposal]] | LLM cannot execute write tools directly; must stage a proposal and wait for user confirmation (SEC-Write-001) |
 
 **Related nodes:** [[MCP Bridge]] · [[MCP Server]] · [[Token Manager]] · [[RBAC System]] · [[AI Service]]
 
@@ -738,7 +759,18 @@ readonly → list-sites, get-system-status,
 - **Chat & LLM:** `chat_sessions`, `chat_messages`, `llm_request_logs`, `llm_routing_config`
 - **Datto Cache:** `datto_sync_log` + 14 `datto_cache_*` tables
 
-**Migrations:** `db/001_extensions.sql` → `db/013_llm_logs_models.sql` (13 numbered migrations + `seed.sql`)
+**Migrations:** `db/001_extensions.sql` → `db/016_audit_log_rls.sql` (16 numbered migrations + `seed.sql`)
+
+| Migration | Purpose |
+|---|---|
+| 001–007 | Extensions, users, roles, tokens, chat, audit, vector index |
+| 008–011 | Datto cache tables, users cache fix, FK relaxation, sync log errors |
+| 012–013 | LLM routing config, LLM logs model columns |
+| 014_hnsw_index | SEC-014: HNSW vector index replacing IVFFlat |
+| 014_observability | Observability performance indexes |
+| 015_action_proposals | SEC-Write-001: ActionProposal state machine table |
+| 016_audit_log_rls | SEC-Audit-001: Audit log immutability via PostgreSQL RLS |
+
 **Seed:** `db/seed.sql` (4 default users, 4 roles, tool assignments, `tool_policies`, `llm_request_logs`)
 
 ---
@@ -1007,6 +1039,41 @@ flowchart LR
 
 ---
 
+## [[ActionProposal]]
+
+**Purpose:** Write tool staging and confirmation flow. The LLM can never execute a write operation directly. Instead it stages an `ActionProposal` which the user must confirm before the platform executes it.
+
+**Source file:** `ai-service/src/actionProposals.ts`
+**Migration:** `db/015_action_proposals.sql`
+
+**State machine:**
+```
+pending  → confirmed (user confirms within 15 min window)
+pending  → rejected  (user rejects)
+pending  → expired   (15 min TTL — checked on read, never updated)
+confirmed → executed (system executes the write tool)
+confirmed → rejected (user changes mind before execution starts)
+```
+
+**API routes:**
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/api/proposals` | List user's pending proposals |
+| `POST` | `/api/proposals` | Stage a new proposal (called by chat pipeline) |
+| `POST` | `/api/proposals/:id/confirm` | User confirms a proposal |
+| `POST` | `/api/proposals/:id/reject` | User rejects a proposal |
+| `POST` | `/api/proposals/:id/execute` | Execute a confirmed proposal (admin/internal only) |
+
+**SEC-Write-004 — Parameter masking:**
+Sensitive fields (passwords, API keys, secrets) are replaced with `***` in `tool_args_masked` before the proposal is stored. The unmasked args are never persisted in the DB.
+
+**No write tools exist yet.** This infrastructure is in place so the pattern is established before the first write tool is added. The chat pipeline will be updated to produce proposals instead of executing write tools when write tools arrive.
+
+**Related nodes:** [[MCP Bridge]] · [[Datto Credential Isolation]] · [[RBAC System]]
+
+---
+
 ## [[Data Explorer]]
 
 **Purpose:** Admin-only browser UI for navigating the local Datto RMM cache without LLM involvement. Provides fast, direct SQL access to sites, devices, audits, software, alerts, and variables.
@@ -1029,6 +1096,37 @@ flowchart LR
 **Design:** Pure read-only SQL against cache tables — no MCP calls, no Datto API dependency, instant results even when Datto is unreachable. All queries join against `datto_cache_*` tables.
 
 **Related nodes:** [[AI Service]] · [[Local Data Cache]] · [[Web App]] · [[RBAC System]]
+
+---
+
+## [[Observability Dashboard]]
+
+**Purpose:** Admin-only dashboard for monitoring system health, LLM usage, tool call patterns, MCP status, chat activity, and cache freshness. Auto-refreshes every 10 seconds via polling. No new dependencies — charts are inline SVG.
+
+**Backend:** `ai-service/src/observability.ts`
+**Migration:** `db/014_observability.sql` (10 performance indexes for time-windowed aggregations)
+**Routes (all `adminOnly` middleware):**
+
+| Route | Handler | Returns |
+|---|---|---|
+| `GET /api/admin/observability/overview` | `handleObsOverview` | Request/tool/error counts (5m/1h/24h), active sessions, tokens, cache mode, 24h time-series |
+| `GET /api/admin/observability/llm` | `handleObsLlm` | Model breakdown, token time-series, last 100 LLM requests with tokens |
+| `GET /api/admin/observability/tools` | `handleObsTools` | Top 20 tools with error rates, call time-series, last 100 tool events |
+| `GET /api/admin/observability/mcp` | `handleObsMcp` | Bridge health probe, error/denied stats, top denied tools, recent errors |
+| `GET /api/admin/observability/chat` | `handleObsChat` | Session/message counts, message volume time-series, active sessions list |
+| `GET /api/admin/observability/cache` | `handleObsCache` | Last 20 sync runs, cache table record counts, cached/live distribution |
+
+**Frontend pages:** `/admin/observability/` subtree (see [[Web App]] pages table)
+
+**Design:**
+- All queries use `Promise.all` for parallel execution
+- Time-series buckets use `DATE_TRUNC('hour', created_at)` for 24h views
+- Overview page shows 6 stat cards with sparklines + 5 clickable drill-down cards
+- Each sub-page: breadcrumb nav, summary cards, SVG charts, data table
+- No heavy scans — all queries hit dedicated `obs_*` indexes from migration 014
+- Data sourced from existing tables: `audit_logs`, `llm_request_logs`, `chat_messages`, `chat_sessions`, `datto_sync_log`, `datto_cache_*`
+
+**Related nodes:** [[AI Service]] · [[Web App]] · [[RBAC System]] · [[Local Data Cache]]
 
 ---
 
@@ -1137,18 +1235,18 @@ SELECT key, model FROM llm_routing_config;
 -- orchestrator_high_risk | claude-opus-4-6             ← Stage 1 when risky tools in scope
 -- synthesizer_default    | claude-haiku-4-5-20251001   ← Stage 2 fallback
 -- synthesizer_large_data | deepseek/deepseek-r1        ← Stage 2 when results > 8 000 chars
--- synthesizer_high_risk  | claude-opus-4-6             ← Stage 2 when high-risk tool was called
+-- synthesizer_high_risk  | claude-opus-4-6             ← Stage 2 when any high-risk tool is in scope
 -- synthesizer_cached     | claude-haiku-4-5-20251001   ← Stage 2 for cached-mode queries
 -- default_data_mode      | cached                      ← default for new sessions
 ```
 
 **Synthesizer priority** (highest wins):
-1. A high-risk tool was called → `synthesizer_high_risk`
+1. Any high-risk tool is in scope → `synthesizer_high_risk` (SEC-Routing-001)
 2. Data mode is `cached` → `synthesizer_cached`
 3. Total tool result length > 8 000 chars → `synthesizer_large_data`
 4. Everything else → `synthesizer_default`
 
-`orchestrator_high_risk` triggers when **any tool in the user's allowed set** has `risk_level = 'high'` in the `tool_policies` table — not just when it is called, but when it is in scope.
+**SEC-Routing-001 — Consistent high-risk routing:** Both `orchestrator_high_risk` and `synthesizer_high_risk` are now scope-based. `checkHighRiskInScope` runs once before Stage 1 and the result is used for both orchestrator and synthesizer model selection. If **any tool in the user's allowed set** has `risk_level = 'high'`, the platform uses high-risk models for the entire request.
 
 ---
 
@@ -1263,7 +1361,7 @@ UPDATE tool_policies SET risk_level = 'high' WHERE tool_name = 'some-tool';
 
 Or via the admin panel: `/admin/tools` → find the tool → change Risk Level to `high`.
 
-`checkHighRiskInScope` fires before Stage 1 and checks if **any** tool in the user's allowed set is high-risk. `checkToolHighRisk` fires per tool call inside the loop and checks if the specific tool that was just called is high-risk.
+`checkHighRiskInScope` fires once before Stage 1 and its result is reused for both stages (SEC-Routing-001). The per-call `checkToolHighRisk` is no longer used for routing — it is available for future use (e.g. proposal staging logic) but removed from the main chat loop.
 
 ---
 
@@ -1325,7 +1423,7 @@ All nodes in this knowledge graph:
 
 **Flows:** [[Authentication Flow]] · [[Chat Request Flow]] · [[Tool Execution Flow]]
 
-**Modules:** [[Token Manager]] · [[RBAC System]] · [[Tool Router]] · [[Prompt Builder]] · [[Data Explorer]]
+**Modules:** [[Token Manager]] · [[RBAC System]] · [[Tool Router]] · [[Prompt Builder]] · [[Data Explorer]] · [[Observability Dashboard]]
 
 **Database:** [[PostgreSQL]] · [[Users Table]] · [[Roles Table]] · [[Tool Permissions Table]] · [[Chat Messages Table]] · `DATABASE.md` (full schema reference)
 

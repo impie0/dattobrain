@@ -34,6 +34,8 @@ services:
       retries: 5
 
   mcp-bridge:
+    # SEC-MCP-001: Read-only MCP bridge. When write tools arrive, split into mcp-write
+    # with separately scoped Datto credentials to preserve the isolation guarantee.
     build:
       context: ./mcp-bridge
       dockerfile: Dockerfile
@@ -41,10 +43,13 @@ services:
     environment:
       PORT: 4001
       MCP_SERVER_URL: http://mcp-server:3001
+      AUTH_SERVICE_URL: http://auth-service:5001  # SEC-MCP-001: introspect to verify permissions
     networks:
       - internal
     depends_on:
       mcp-server:
+        condition: service_healthy
+      auth-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:4001/health || exit 1"]
@@ -108,10 +113,9 @@ services:
       retries: 5
 
   litellm:
-    # PIN THIS to a specific release before going to production, e.g. ghcr.io/berriai/litellm:v1.67.2
-    # main-latest is a mutable tag — a breaking upstream change will auto-deploy without warning.
-    # Check releases at https://github.com/BerriAI/litellm/releases and update here + test before bumping.
-    image: ghcr.io/berriai/litellm:main-stable
+    # Pinned to v1.82.3 (2026-03-19). To upgrade: check https://github.com/BerriAI/litellm/releases,
+    # update this tag, rebuild (docker compose build litellm), smoke-test before deploying.
+    image: ghcr.io/berriai/litellm:v1.82.3-stable
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
     volumes:
       - ./services/litellm/config.yaml:/app/config.yaml:ro
@@ -163,6 +167,24 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # mcp-write: PLACEHOLDER — not yet implemented.
+  # When write tools are added, build a separate mcp-write container here with its own
+  # separately scoped Datto credentials (write-capable OAuth scope only). This preserves
+  # the isolation guarantee: a compromised mcp-read container gives read-only Datto access,
+  # a compromised mcp-write container gives write access only to the narrowly scoped actions.
+  # mcp-write routes MUST go through the ActionProposal confirmation flow (015_action_proposals.sql)
+  # before any write tool executes. Direct LLM → write execution is never permitted.
+  #
+  # mcp-write:
+  #   build:
+  #     context: ./write-mcp
+  #     dockerfile: Dockerfile
+  #   env_file: .env.write   # separate credentials file — never mix with read credentials
+  #   environment:
+  #     PORT: 3002
+  #   networks:
+  #     - internal
 
   redis:
     image: redis:7-alpine

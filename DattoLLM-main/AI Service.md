@@ -45,6 +45,7 @@ description: Two-stage LLM pipeline with tool routing, vector search, and conver
 | `src/sync.ts` | Local data cache sync pipeline — rate-limited MCP calls → upsert cache tables; PostgreSQL advisory locks prevent concurrent runs (SEC-011) |
 | `src/cachedQueries.ts` | SQL query handlers for all 28 cacheable tools |
 | `src/dataBrowser.ts` | [[Data Explorer]] REST handlers — read-only SQL against cache tables |
+| `src/observability.ts` | [[Observability Dashboard]] — 6 admin endpoints aggregating metrics from audit_logs, llm_request_logs, chat_messages, chat_sessions, datto_sync_log |
 
 ## Two-Stage Pipeline
 
@@ -55,4 +56,4 @@ Model selection per stage is driven by `llmConfig.ts` reading from the `llm_rout
 
 ## Related Nodes
 
-[[Prompt Builder]] · [[Tool Router]] · [[MCP Bridge]] · [[Chat Request Flow]] · [[Tool Execution Flow]] · [[Chat Messages Table]] · [[RBAC System]] · [[Embedding Service]]
+[[Prompt Builder]] · [[Tool Router]] · [[MCP Bridge]] · [[Chat Request Flow]] · [[Tool Execution Flow]] · [[Chat Messages Table]] · [[RBAC System]] · [[Embedding Service]] · [[Observability Dashboard]]

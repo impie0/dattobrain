@@ -14,6 +14,10 @@ import {
   handleGetMyApprovals, handleGetApprovable,
   handleUserApprove, handleUserReject,
 } from "./approvals.js";
+import {
+  handleStageProposal, handleListProposals,
+  handleConfirmProposal, handleRejectProposal, handleExecuteProposal,
+} from "./actionProposals.js";
 import { pool } from "./db.js";
 import { runSync, runAlertSync, getSyncStatus, startScheduledSync, pauseSync, resumeSync, isSyncPaused } from "./sync.js";
 import {
@@ -21,6 +25,10 @@ import {
   handleBrowserDevices, handleBrowserDevice, handleBrowserDeviceSoftware,
   handleBrowserAlerts,
 } from "./dataBrowser.js";
+import {
+  handleObsOverview, handleObsLlm, handleObsTools,
+  handleObsMcp, handleObsChat, handleObsCache,
+} from "./observability.js";
 
 function log(level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) {
   const line = JSON.stringify({ level, msg, ts: Date.now(), ...extra });
@@ -124,6 +132,15 @@ app.get("/api/approvals/mine", handleGetMyApprovals);
 app.get("/api/approvals/approvable", handleGetApprovable);
 app.post("/api/approvals/:id/approve", handleUserApprove);
 app.post("/api/approvals/:id/reject", handleUserReject);
+
+// ── Write tool ActionProposals (SEC-Write-001) ─────────────────────────────
+// Stage → confirm/reject → execute state machine for write tool operations.
+// Proposals expire after 15 minutes if not confirmed.
+app.get("/api/proposals",                  (req, res) => handleListProposals(req, res, pool));
+app.post("/api/proposals",                 (req, res) => handleStageProposal(req, res, pool));
+app.post("/api/proposals/:id/confirm",     (req, res) => handleConfirmProposal(req, res, pool));
+app.post("/api/proposals/:id/reject",      (req, res) => handleRejectProposal(req, res, pool));
+app.post("/api/proposals/:id/execute",     (req, res) => handleExecuteProposal(req, res, pool));
 
 // ── Admin — forced logout (SEC-008) ────────────────────────────────────────
 // Proxies to auth-service /auth/revoke — revokes all active JTIs for the user
@@ -282,6 +299,14 @@ app.get("/api/admin/browser/devices",          adminOnly, (req, res) => handleBr
 app.get("/api/admin/browser/devices/:uid",     adminOnly, (req, res) => handleBrowserDevice(req, res, pool));
 app.get("/api/admin/browser/devices/:uid/software", adminOnly, (req, res) => handleBrowserDeviceSoftware(req, res, pool));
 app.get("/api/admin/browser/alerts",           adminOnly, (req, res) => handleBrowserAlerts(req, res, pool));
+
+// ── Admin — observability ──────────────────────────────────────────────────
+app.get("/api/admin/observability/overview", adminOnly, (req, res) => handleObsOverview(req, res, pool));
+app.get("/api/admin/observability/llm",      adminOnly, (req, res) => handleObsLlm(req, res, pool));
+app.get("/api/admin/observability/tools",    adminOnly, (req, res) => handleObsTools(req, res, pool));
+app.get("/api/admin/observability/mcp",      adminOnly, (req, res) => handleObsMcp(req, res, pool));
+app.get("/api/admin/observability/chat",     adminOnly, (req, res) => handleObsChat(req, res, pool));
+app.get("/api/admin/observability/cache",    adminOnly, (req, res) => handleObsCache(req, res, pool));
 
 // ── Platform SSE route ─────────────────────────────────────────────────────
 app.post("/chat", handleChat);

@@ -1,0 +1,11 @@
+filters:
+  or:
+    - file.hasTag("platform/security")
+    - file.hasTag("security")
+views:
+  - type: table
+    name: Security Nodes
+    order:
+      - file.name
+      - type
+      - description

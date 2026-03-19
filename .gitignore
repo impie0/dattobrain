@@ -1,0 +1,6 @@
+.gitnexus
+.env
+.env.*
+*.local
+.claude/settings.local.json
+node_modules/
