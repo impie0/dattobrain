@@ -116,7 +116,7 @@ export default function ChatPage() {
 
   const loadHistoryItem = useCallback((item: HistoryItem) => {
     const restored: Message[] = [
-      { role: "user", text: item.question },
+      { role: "user", text: item.question ?? "Untitled" },
     ];
     if (item.answer) restored.push({ role: "assistant", text: item.answer });
     setMessages(restored);
@@ -269,7 +269,7 @@ export default function ChatPage() {
                 }}
               >
                 <div style={{ fontWeight: activeSession === item.id ? 600 : 400, marginBottom: "2px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {item.question.slice(0, 60)}{item.question.length > 60 ? "…" : ""}
+                  {(item.question ?? "Untitled").slice(0, 60)}{(item.question ?? "").length > 60 ? "…" : ""}
                 </div>
                 <div style={{ color: "#475569", fontSize: "0.6875rem" }}>
                   {new Date(item.created_at).toLocaleDateString()}

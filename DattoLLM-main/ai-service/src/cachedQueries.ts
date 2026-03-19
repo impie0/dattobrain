@@ -61,7 +61,52 @@ export async function cachedListSites(db: Pool, args: Record<string, unknown>): 
   const page = Number(args["page"] ?? 1);
   const pageSize = Number(args["pageSize"] ?? 50);
   const offset = (page - 1) * pageSize;
+  const siteName = typeof args["siteName"] === "string" ? args["siteName"].trim() : "";
 
+  if (siteName) {
+    // Step 1: Try exact ILIKE substring match
+    const ilike = await db.query(
+      `SELECT data, synced_at FROM datto_cache_sites WHERE name ILIKE $1 ORDER BY name LIMIT $2 OFFSET $3`,
+      [`%${siteName}%`, pageSize, offset]
+    );
+    if (ilike.rows.length > 0) {
+      const total = await db.query(`SELECT COUNT(*) FROM datto_cache_sites WHERE name ILIKE $1`, [`%${siteName}%`]);
+      const totalCount = Number((total.rows[0] as { count: string }).count);
+      const synced = latestSync(ilike.rows as { synced_at: Date }[]);
+      return JSON.stringify({
+        sites: ilike.rows.map((r: { data: unknown }) => r.data),
+        pageDetails: { page, pageSize, count: ilike.rowCount, totalCount, totalPages: Math.ceil(totalCount / pageSize) },
+      }) + CACHED_NOTE(synced);
+    }
+
+    // Step 2: Fuzzy fallback with pg_trgm (handles typos like "rojlig" → "Rohlig")
+    const fuzzy = await db.query(
+      `SELECT data, synced_at, similarity(name, $1) AS sim
+       FROM datto_cache_sites
+       WHERE similarity(name, $1) > 0.2
+       ORDER BY sim DESC
+       LIMIT $2 OFFSET $3`,
+      [siteName, pageSize, offset]
+    );
+    if (fuzzy.rows.length > 0) {
+      const total = await db.query(`SELECT COUNT(*) FROM datto_cache_sites WHERE similarity(name, $1) > 0.2`, [siteName]);
+      const totalCount = Number((total.rows[0] as { count: string }).count);
+      const synced = latestSync(fuzzy.rows as { synced_at: Date }[]);
+      return JSON.stringify({
+        sites: fuzzy.rows.map((r: { data: unknown }) => r.data),
+        pageDetails: { page, pageSize, count: fuzzy.rowCount, totalCount, totalPages: Math.ceil(totalCount / pageSize) },
+        _fuzzyMatch: true,
+      }) + CACHED_NOTE(synced) + `\n[Fuzzy match — no exact match for "${siteName}"]`;
+    }
+
+    // Step 3: Nothing found
+    return JSON.stringify({
+      sites: [],
+      pageDetails: { page, pageSize, count: 0, totalCount: 0, totalPages: 0 },
+    }) + CACHED_NOTE(null) + `\n[No sites matching "${siteName}" found]`;
+  }
+
+  // No filter — existing pagination-only path (unchanged)
   const r = await db.query(
     `SELECT data, synced_at FROM datto_cache_sites ORDER BY name LIMIT $1 OFFSET $2`,
     [pageSize, offset]
@@ -138,6 +183,13 @@ export async function cachedListDevices(db: Pool, args: Record<string, unknown>)
   if (args["online"] !== undefined) { conditions.push(`online = $${pi++}`); params.push(args["online"]); }
   if (args["deviceClass"]) { conditions.push(`device_class = $${pi++}`); params.push(args["deviceClass"]); }
   if (args["operatingSystem"]) { conditions.push(`operating_system ILIKE $${pi++}`); params.push(`%${args["operatingSystem"]}%`); }
+  if (args["siteName"]) {
+    // ILIKE substring OR pg_trgm fuzzy match — handles typos in site names
+    const siteNameVal = String(args["siteName"]);
+    conditions.push(`(site_name ILIKE $${pi} OR similarity(site_name, $${pi + 1}) > 0.2)`);
+    params.push(`%${siteNameVal}%`, siteNameVal);
+    pi += 2;
+  }
 
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const r = await db.query(`SELECT data, synced_at FROM datto_cache_devices ${where} ORDER BY hostname LIMIT $1 OFFSET $2`, params);
@@ -286,8 +338,15 @@ export function isLiveOnlyTool(toolName: string): boolean {
 export async function executeCachedTool(
   toolName: string,
   args: Record<string, unknown>,
-  db: Pool
+  db: Pool,
+  allowedTools: string[]
 ): Promise<string> {
+  // SEC-Cache-001: Defense-in-depth — even if the caller forgets to check,
+  // this function will not execute an unauthorized tool.
+  if (!allowedTools.includes(toolName)) {
+    throw new Error(`SEC-Cache-001: Tool "${toolName}" not in allowedTools`);
+  }
+
   switch (toolName) {
     // Account
     case "get-account":             return cachedGetAccount(db);

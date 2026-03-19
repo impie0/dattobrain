@@ -10,6 +10,7 @@ services:
       POSTGRES_DB: datto_rmm
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./db:/docker-entrypoint-initdb.d:ro
     networks:
       - internal
     healthcheck:
@@ -75,7 +76,7 @@ services:
   pgbouncer:
     # SEC-010: connection pooler — session mode required for pg_advisory_lock (SEC-011 sync locks)
     # edoburu/pgbouncer reads /etc/pgbouncer/pgbouncer.ini and userlist.txt directly (no init override).
-    image: edoburu/pgbouncer:1.23.1
+    image: edoburu/pgbouncer:latest
     volumes:
       - ./services/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
       - ./services/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro

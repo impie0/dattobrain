@@ -6,5 +6,6 @@ CREATE TABLE IF NOT EXISTS users (
   is_active     BOOLEAN NOT NULL DEFAULT TRUE,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  last_login_at TIMESTAMPTZ
+  last_login_at      TIMESTAMPTZ,
+  approval_authority TEXT[] DEFAULT '{}'
 );

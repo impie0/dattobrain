@@ -12,7 +12,7 @@ import {
 import { timingSafeEqual } from "node:crypto";
 
 import { loadConfig, TokenManager } from "./auth.js";
-import { createApiClient, type ToolDef } from "./api.js";
+import { createApiClient, type ToolDef, _lastDattoSpans } from "./api.js";
 
 import { accountTools } from "./tools/account.js";
 import { siteTools } from "./tools/sites.js";
@@ -147,6 +147,14 @@ async function main() {
         `mcp_datto_calls_total ${dattoCallsTotal}`,
       ].join("\n")
     );
+  });
+
+  // ── Trace spans endpoint — returns recent Datto API call details ──────
+  app.get("/trace-spans", (req, res) => {
+    if (!checkSecret(req, res)) return;
+    // Return and drain the buffer
+    const spans = _lastDattoSpans.splice(0);
+    res.json({ spans });
   });
 
   // ── MCP endpoint ──────────────────────────────────────────────────────────

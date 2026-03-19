@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **DattoLLM-main** (571 symbols, 1117 relationships, 37 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **dattobrain** (734 symbols, 1468 relationships, 49 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -17,7 +17,7 @@ This project is indexed by GitNexus as **DattoLLM-main** (571 symbols, 1117 rela
 
 1. `gitnexus_query({query: "<error or symptom>"})` — find execution flows related to the issue
 2. `gitnexus_context({name: "<suspect function>"})` — see all callers, callees, and process participation
-3. `READ gitnexus://repo/DattoLLM-main/process/{processName}` — trace the full execution flow step by step
+3. `READ gitnexus://repo/dattobrain/process/{processName}` — trace the full execution flow step by step
 4. For regressions: `gitnexus_detect_changes({scope: "compare", base_ref: "main"})` — see what your branch changed
 
 ## When Refactoring
@@ -56,10 +56,10 @@ This project is indexed by GitNexus as **DattoLLM-main** (571 symbols, 1117 rela
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/DattoLLM-main/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/DattoLLM-main/clusters` | All functional areas |
-| `gitnexus://repo/DattoLLM-main/processes` | All execution flows |
-| `gitnexus://repo/DattoLLM-main/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/dattobrain/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/dattobrain/clusters` | All functional areas |
+| `gitnexus://repo/dattobrain/processes` | All execution flows |
+| `gitnexus://repo/dattobrain/process/{name}` | Step-by-step execution trace |
 
 ## Self-Check Before Finishing
 
@@ -97,26 +97,6 @@ To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.
 | Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
 | Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
-| Work in the Users area (37 symbols) | `.claude/skills/generated/users/SKILL.md` |
-| Work in the Cluster_29 area (17 symbols) | `.claude/skills/generated/cluster-29/SKILL.md` |
-| Work in the Cluster_11 area (11 symbols) | `.claude/skills/generated/cluster-11/SKILL.md` |
-| Work in the Cluster_17 area (10 symbols) | `.claude/skills/generated/cluster-17/SKILL.md` |
-| Work in the Cluster_28 area (10 symbols) | `.claude/skills/generated/cluster-28/SKILL.md` |
-| Work in the Approvals area (10 symbols) | `.claude/skills/generated/approvals/SKILL.md` |
-| Work in the Cluster_13 area (9 symbols) | `.claude/skills/generated/cluster-13/SKILL.md` |
-| Work in the Cluster_0 area (8 symbols) | `.claude/skills/generated/cluster-0/SKILL.md` |
-| Work in the Cluster_7 area (8 symbols) | `.claude/skills/generated/cluster-7/SKILL.md` |
-| Work in the Roles area (7 symbols) | `.claude/skills/generated/roles/SKILL.md` |
-| Work in the Data-sync area (7 symbols) | `.claude/skills/generated/data-sync/SKILL.md` |
-| Work in the Sites area (7 symbols) | `.claude/skills/generated/sites/SKILL.md` |
-| Work in the Llm-logs area (6 symbols) | `.claude/skills/generated/llm-logs/SKILL.md` |
-| Work in the [uid] area (6 symbols) | `.claude/skills/generated/uid/SKILL.md` |
-| Work in the Chat area (5 symbols) | `.claude/skills/generated/chat/SKILL.md` |
-| Work in the Tools area (5 symbols) | `.claude/skills/generated/tools/SKILL.md` |
-| Work in the Llm-config area (5 symbols) | `.claude/skills/generated/llm-config/SKILL.md` |
-| Work in the Cluster_8 area (4 symbols) | `.claude/skills/generated/cluster-8/SKILL.md` |
-| Work in the Cluster_9 area (4 symbols) | `.claude/skills/generated/cluster-9/SKILL.md` |
-| Work in the Cluster_14 area (4 symbols) | `.claude/skills/generated/cluster-14/SKILL.md` |
 
 <!-- gitnexus:end -->
 

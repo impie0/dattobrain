@@ -9,7 +9,7 @@ export function writeDelta(res: Response, delta: string, sessionId: string): voi
 export function writeToolCall(
   res: Response,
   tool: string,
-  status: "calling" | "done"
+  status: "calling" | "done" | "denied"
 ): void {
   const id = randomUUID();
   res.write(

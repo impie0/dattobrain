@@ -4,7 +4,7 @@ tags:
   - mcp
   - tools
 type: Flow
-description: Three-layer permission enforcement from AI Service through MCP Bridge to MCP Server and Datto API
+description: Five-layer permission enforcement — prompt filter, ai-service gate (SEC-Cache-001), MCP Bridge (SEC-MCP-001), MCP registry, write gate (SEC-Write-001)
 ---
 
 # Tool Execution Flow
@@ -50,14 +50,19 @@ sequenceDiagram
     end
 ```
 
-## Three-Layer Permission Model
+## Five-Layer Permission Model
 
 | Layer | Where | What it stops |
 |---|---|---|
 | **1 — Prompt** | [[Prompt Builder]] | Model never sees definitions of unauthorised tools |
-| **2 — Bridge gate** | [[MCP Bridge]] `validate.ts` | 403 on any tool not in `allowedTools` |
+| **1.5 — ai-service gate (SEC-Cache-001)** | `permissions.ts` + `chat.ts` / `legacyChat.ts` / `cachedQueries.ts` | Rejects tool names not in `allowedTools` before any execution — covers both cached and live paths |
+| **2 — Bridge gate (SEC-MCP-001)** | [[MCP Bridge]] `index.ts` | Calls auth-service introspect for DB-sourced `allowedTools`; ignores caller-supplied list |
 | **3 — MCP registry** | [[MCP Server]] | `Unknown tool: x` error for unregistered names |
+| **4 — Write gate (SEC-Write-001)** | [[ActionProposal]] | Write tools must be staged as a proposal and confirmed by the user before execution |
+
+> [!info] SEC-Cache-001 — Cached Tool Permission Gate
+> When `dataMode === "cached"`, tool calls bypass the [[MCP Bridge]] entirely and execute directly against `datto_cache_*` tables. Layer 1.5 is the **only hard gate** for cached tools. Three-point enforcement: call-site check, inner check in `executeCachedTool()`, and live pre-flight. Denials are audit-logged with `event_type = "tool_denied"` and metadata `{ sec: "SEC-Cache-001" }`.
 
 ## Related Nodes
 
-[[MCP Bridge]] · [[MCP Server]] · [[Token Manager]] · [[RBAC System]] · [[AI Service]] · [[Chat Request Flow]]
+[[MCP Bridge]] · [[MCP Server]] · [[Token Manager]] · [[RBAC System]] · [[AI Service]] · [[Chat Request Flow]] · [[ActionProposal]]

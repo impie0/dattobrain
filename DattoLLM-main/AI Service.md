@@ -46,6 +46,8 @@ description: Two-stage LLM pipeline with tool routing, vector search, and conver
 | `src/cachedQueries.ts` | SQL query handlers for all 28 cacheable tools |
 | `src/dataBrowser.ts` | [[Data Explorer]] REST handlers — read-only SQL against cache tables |
 | `src/observability.ts` | [[Observability Dashboard]] — 6 admin endpoints aggregating metrics from audit_logs, llm_request_logs, chat_messages, chat_sessions, datto_sync_log |
+| `src/permissions.ts` | SEC-Cache-001: Tool permission check + audit-log utility for cached and live paths — `isToolAllowed()`, `toolDeniedMessage()`, `checkAndAuditToolPermission()` |
+| `src/actionProposals.ts` | [[ActionProposal]] state machine — stage/list/confirm/reject/execute write tool proposals (SEC-Write-001) |
 
 ## Two-Stage Pipeline
 

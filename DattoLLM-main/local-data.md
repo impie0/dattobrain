@@ -1,6 +1,6 @@
 # Local Data — Datto Cache Architecture
 
-> Status: Design only — no code built yet
+> Status: **Implemented** — sync pipeline, cached queries, fuzzy search, and SEC-Cache-001 permission gate all operational
 > Purpose: Pull Datto RMM data into local PostgreSQL on a schedule. AI queries local DB instead of calling Datto API live. A "Live" button bypasses the cache for real-time data.
 
 ---
@@ -573,18 +573,58 @@ This is appended to the tool result so the AI can inform the user if asked wheth
 
 ---
 
-## Implementation Order
+## Fuzzy Search (pg_trgm)
 
-1. Create all `datto_cache_*` tables (migrations in `db/`)
-2. Build sync service in `ai-service/src/sync.ts`
-   - Paginated fetch functions for each data type
-   - Upsert logic (INSERT ... ON CONFLICT DO UPDATE)
-   - Writes to `datto_sync_log`
-3. Add sync endpoints to `ai-service/src/index.ts`
-   - `POST /api/admin/sync` — trigger manual sync
-   - `GET /api/admin/sync/status` — current sync state + record counts
-4. Build cached query handlers — one per tool that has a cached equivalent
-5. Add mode switching logic to `legacyChat.ts` and `chat.ts`
-6. Add "Data Sync" page to admin panel
-7. Add "Live" toggle to chat UI
-8. Add cron job inside ai-service for scheduled syncs
+`cachedListSites()` and `cachedListDevices()` support typo-tolerant lookup using the `siteName` and `hostname` parameters:
+
+1. **ILIKE substring match** — fast, exact substring
+2. **pg_trgm `similarity() > 0.2` fuzzy fallback** — handles typos (e.g. "rojlig" → "Rohlig", similarity = 0.4)
+3. **Explicit "not found"** — returned if both stages find nothing
+
+**GIN trigram indexes** (migration `db/018_fuzzy_search.sql`):
+- `datto_cache_sites.name gin_trgm_ops`
+- `datto_cache_devices.hostname gin_trgm_ops`
+- `datto_cache_devices.site_name gin_trgm_ops`
+
+Tool descriptions instruct the LLM to ALWAYS use filters when looking for specific sites/devices, preventing bulk listing. This reduces token usage from ~170K (all 89 sites) to ~2K (single matched site).
+
+---
+
+## Stage 2 Context Compression (SEC-015b)
+
+`compressForSynthesizer()` truncates large tool results before sending to Stage 2:
+- Tool results > 12K chars are truncated with a `[... truncated]` note
+- Total context capped at ~120K chars
+- Stage 1 always sees full data; only Stage 2 is compressed
+- Wired into both `chat.ts` and `legacyChat.ts` synthesizer calls
+
+---
+
+## SEC-Cache-001 — Cached Tool Permission Gate
+
+When `dataMode === "cached"`, tool calls bypass the [[MCP Bridge]] entirely — executing directly against `datto_cache_*` tables via `executeCachedTool()`. Layer 1.5 (`permissions.ts`) is the **only hard gate** for cached tools.
+
+Three-point enforcement:
+1. **Call-site check** (`chat.ts` + `legacyChat.ts`): `checkAndAuditToolPermission()` validates tool name before execution
+2. **Inner check** (`cachedQueries.ts`): `executeCachedTool()` requires `allowedTools` parameter — TypeScript enforces this
+3. **Live pre-flight**: Same check applies to live tools, catching hallucinated names without a bridge round-trip
+
+Denials are audit-logged with `event_type = "tool_denied"` and metadata `{ sec: "SEC-Cache-001" }`.
+
+---
+
+## Implementation Status
+
+All items below are complete:
+
+1. ~~Create all `datto_cache_*` tables (migrations in `db/`)~~ ✅
+2. ~~Build sync service in `ai-service/src/sync.ts`~~ ✅
+3. ~~Add sync endpoints to `ai-service/src/index.ts`~~ ✅
+4. ~~Build cached query handlers — one per tool~~ ✅
+5. ~~Add mode switching logic to `legacyChat.ts` and `chat.ts`~~ ✅
+6. ~~Add "Data Sync" page to admin panel~~ ✅
+7. ~~Add "Live" toggle to chat UI~~ ✅
+8. ~~Add cron job inside ai-service for scheduled syncs~~ ✅
+9. ~~Fuzzy search with pg_trgm~~ ✅ (migration 018)
+10. ~~SEC-Cache-001 permission gate~~ ✅
+11. ~~Stage 2 context compression~~ ✅

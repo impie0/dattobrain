@@ -9,6 +9,7 @@ import { callTool } from "./mcpBridge.js";
 import { buildSystemPrompt, buildSynthesizerPrompt } from "./prompt.js";
 import { writeDelta, writeToolCall, writeError, writeDone } from "./sse.js";
 import { executeCachedTool, isLiveOnlyTool } from "./cachedQueries.js";
+import { checkAndAuditToolPermission, toolDeniedMessage } from "./permissions.js";
 import {
   getRoutingConfig,
   selectOrchestratorModel,
@@ -16,11 +17,42 @@ import {
   checkHighRiskInScope,
 } from "./llmConfig.js";
 import { llmClient, synthesizeStream } from "./modelRouter.js";
+import { TraceContext } from "./tracing.js";
 
 function log(level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) {
   const line = JSON.stringify({ level, msg, ts: Date.now(), ...extra });
   if (level === "error") process.stderr.write(line + "\n");
   else process.stdout.write(line + "\n");
+}
+
+/**
+ * SEC-015b: Compress conversation messages for Stage 2.
+ * Tool results can be huge (full device lists, audit data). The synthesizer
+ * only needs enough to write a summary. Truncate large tool results to fit
+ * within the target model's context window (~120k chars ≈ 30k tokens safe).
+ */
+const STAGE2_MAX_CHARS = 120_000;
+const TOOL_RESULT_MAX = 12_000;
+
+function compressForSynthesizer(
+  msgs: OpenAI.ChatCompletionMessageParam[]
+): OpenAI.ChatCompletionMessageParam[] {
+  const totalChars = msgs.reduce(
+    (s, m) => s + (typeof m.content === "string" ? m.content.length : 0), 0
+  );
+  if (totalChars <= STAGE2_MAX_CHARS) return msgs;
+
+  log("info", "stage2_context_compression", { totalChars, targetMax: STAGE2_MAX_CHARS });
+  return msgs.map(m => {
+    if (m.role === "tool" && typeof m.content === "string" && m.content.length > TOOL_RESULT_MAX) {
+      return {
+        ...m,
+        content: m.content.slice(0, TOOL_RESULT_MAX) +
+          `\n\n[... truncated from ${m.content.length} chars for synthesis — full data was used in Stage 1]`,
+      };
+    }
+    return m;
+  });
 }
 
 async function embed(text: string): Promise<{ vector: number[] }> {
@@ -64,26 +96,73 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
 
   const requestId = randomUUID();
 
+  // ── Tracing: create context ───────────────────────────────────────────────
+  const trace = new TraceContext(pool, requestId);
+  await trace.init({ userId, sessionId, question: message });
+
   try {
+    const rootSpan = await trace.startSpan("ai-service", "incoming_request", {
+      requestPayload: {
+        message: message.slice(0, 500),
+        sessionId,
+        allowedTools: allowedTools,
+        headers: { "x-user-id": userId, "x-user-role": req.headers["x-user-role"] },
+      },
+    });
+
     // Load routing config (60s cached)
+    const cfgSpan = await trace.startSpan("ai-service", "db_routing_config", { parentSpanId: rootSpan.spanId });
     const routingConfig = await getRoutingConfig(pool);
+    await cfgSpan.end("ok", { metadata: { source: "llm_routing_config" } });
 
     // Resolve data mode — prefer explicit session value, else use configured default
+    const sessSpan = await trace.startSpan("ai-service", "db_session_lookup", { parentSpanId: rootSpan.spanId, requestPayload: { sessionId } });
     const sessionRow = await pool.query(
       `SELECT data_mode FROM chat_sessions WHERE id = $1`,
       [sessionId]
     ).catch(() => ({ rows: [] }));
+    await sessSpan.end("ok", { metadata: { found: sessionRow.rows.length > 0, sessionId } });
     const dataMode: "cached" | "live" =
       (sessionRow.rows[0] as { data_mode?: string } | undefined)?.data_mode === "live"
         ? "live"
         : routingConfig.default_data_mode === "live" ? "live" : "cached";
 
     // Load history + embed + search similar in parallel
+    const promptSpan = await trace.startSpan("ai-service", "prompt_build", { parentSpanId: rootSpan.spanId });
+
     const [history, similarMessages] = await Promise.all([
-      loadHistory(sessionId, pool),
-      embed(message)
-        .then(({ vector }) => searchSimilar(vector, userId, sessionId, pool))
-        .catch(() => []),
+      (async () => {
+        const s = await trace.startSpan("ai-service", "db_load_history", { parentSpanId: promptSpan.spanId, requestPayload: { sessionId } });
+        try {
+          const h = await loadHistory(sessionId, pool);
+          await s.end("ok", { metadata: { messageCount: h.length, sessionId } });
+          return h;
+        } catch (e) {
+          await s.end("error", { errorMessage: e instanceof Error ? e.message : String(e) });
+          return [] as OpenAI.ChatCompletionMessageParam[];
+        }
+      })(),
+      (async () => {
+        const embedSpan = await trace.startSpan("embedding-service", "embed_text", {
+          parentSpanId: promptSpan.spanId,
+          requestPayload: { textLength: message.length, endpoint: "/embed" },
+        });
+        try {
+          const { vector } = await embed(message);
+          await embedSpan.end("ok", { metadata: { dimensions: vector.length }, responsePayload: { vectorLength: vector.length } });
+
+          const searchSpan = await trace.startSpan("ai-service", "db_vector_search", {
+            parentSpanId: promptSpan.spanId,
+            requestPayload: { vectorDimensions: vector.length, userId, sessionId, threshold: 0.78 },
+          });
+          const results = await searchSimilar(vector, userId, sessionId, pool);
+          await searchSpan.end("ok", { metadata: { resultCount: results.length } });
+          return results;
+        } catch (e) {
+          await embedSpan.end("error", { errorMessage: e instanceof Error ? e.message : String(e) });
+          return [];
+        }
+      })(),
     ]);
 
     // Filter tools to only allowed
@@ -91,6 +170,16 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
 
     // Build system prompt
     const systemPrompt = buildSystemPrompt(similarMessages);
+
+    await promptSpan.end("ok", {
+      metadata: {
+        historyLength: history.length,
+        similarMessagesCount: similarMessages.length,
+        filteredToolCount: filteredTools.length,
+        toolNames: filteredTools.map(t => t.name),
+        dataMode,
+      },
+    });
 
     // Conversation messages (system is passed separately to each LLM call)
     const conversationMessages: OpenAI.ChatCompletionMessageParam[] = [
@@ -109,7 +198,9 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
     }));
 
     // Determine orchestrator model
+    const riskSpan = await trace.startSpan("ai-service", "db_high_risk_check", { parentSpanId: rootSpan.spanId, requestPayload: { toolCount: filteredTools.length } });
     const highRiskInScope = await checkHighRiskInScope(filteredTools.map(t => t.name), pool);
+    await riskSpan.end("ok", { metadata: { highRiskInScope, toolCount: filteredTools.length } });
     const orchestratorModel = selectOrchestratorModel(routingConfig, highRiskInScope);
 
     const toolsUsed: string[] = [];
@@ -126,7 +217,19 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
     const CONTEXT_OVERFLOW_CHARS = 100_000;
 
     // ── STAGE 1: Orchestrator — tool selection loop ───────────────────────────
+    let stage1Iteration = 0;
     while (true) {
+      stage1Iteration++;
+      const llmSpan = await trace.startSpan("ai-service", `llm_stage1_iter_${stage1Iteration}`, {
+        parentSpanId: rootSpan.spanId,
+        requestPayload: { model: orchestratorModel, messageCount: conversationMessages.length },
+      });
+
+      const litellmSpan = await trace.startSpan("litellm", "chat_completion", {
+        parentSpanId: llmSpan.spanId,
+        requestPayload: { model: orchestratorModel, stream: true, endpoint: "/v1/chat/completions", stage: "orchestrator" },
+      });
+
       const stream = await llmClient.chat.completions.create({
         model: orchestratorModel,
         messages: [{ role: "system", content: systemPrompt }, ...conversationMessages],
@@ -159,11 +262,24 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
         }
       }
 
+      await litellmSpan.end("ok", { metadata: { model: orchestratorModel, finishReason }, responsePayload: { textLength: textChunk.length, toolCallCount: toolCallsMap.size } });
+
       fullStage1Content += textChunk;
 
-      if (finishReason !== "tool_calls" || toolCallsMap.size === 0) break;
+      if (finishReason !== "tool_calls" || toolCallsMap.size === 0) {
+        await llmSpan.end("ok", {
+          metadata: { model: orchestratorModel, finishReason, toolCallCount: 0 },
+          responsePayload: { textLength: textChunk.length },
+        });
+        break;
+      }
 
       const toolCalls = Array.from(toolCallsMap.values()).filter(tc => tc.name);
+
+      await llmSpan.end("ok", {
+        metadata: { model: orchestratorModel, finishReason, toolCallCount: toolCalls.length },
+        responsePayload: { toolCalls: toolCalls.map(tc => ({ name: tc.name, args: tc.argsJson.slice(0, 200) })) },
+      });
 
       conversationMessages.push({
         role: "assistant",
@@ -177,6 +293,30 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
 
       for (const tc of toolCalls) {
         const toolName = tc.name;
+
+        // SEC-Cache-001: Hard permission gate — reject tool names not in allowedTools
+        const permitted = await checkAndAuditToolPermission(
+          toolName, allowedTools, userId, requestId, pool,
+          dataMode === "cached" && !isLiveOnlyTool(toolName) ? "cached" : "live_preflight"
+        );
+        if (!permitted) {
+          const denySpan = await trace.startSpan("ai-service", "tool_denied", {
+            parentSpanId: rootSpan.spanId,
+            requestPayload: { toolName, sec: "SEC-Cache-001" },
+          });
+          await denySpan.end("error", {
+            metadata: { toolName, reason: "not_in_allowed_tools" },
+            errorMessage: `Tool '${toolName}' denied by SEC-Cache-001`,
+          });
+          writeToolCall(res, toolName, "denied");
+          conversationMessages.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: toolDeniedMessage(toolName),
+          });
+          continue;
+        }
+
         toolsUsed.push(toolName);
         writeToolCall(res, toolName, "calling");
 
@@ -184,21 +324,33 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
         try { toolInput = JSON.parse(tc.argsJson) as Record<string, unknown>; }
         catch { toolInput = {}; }
 
+        const toolSpan = await trace.startSpan("ai-service", "tool_call", {
+          parentSpanId: rootSpan.spanId,
+          requestPayload: { toolName, toolInput, dataMode, cached: dataMode === "cached" && !isLiveOnlyTool(toolName) },
+        });
+
         let resultText: string;
         if (dataMode === "cached" && !isLiveOnlyTool(toolName)) {
           try {
-            resultText = await executeCachedTool(toolName, toolInput, pool);
+            const cacheSpan = await trace.startSpan("ai-service", "db_cached_query", { parentSpanId: toolSpan.spanId, requestPayload: { toolName, toolInput } });
+            resultText = await executeCachedTool(toolName, toolInput, pool, allowedTools);
+            await cacheSpan.end("ok", { metadata: { toolName, source: "datto_cache" }, responsePayload: { resultLength: resultText.length } });
           } catch {
-            const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken);
+            const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken, trace.traceId, toolSpan.spanId);
             resultText = typeof liveResult.result === "string" ? liveResult.result : JSON.stringify(liveResult.result);
           }
         } else {
-          const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken);
+          const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken, trace.traceId, toolSpan.spanId);
           resultText = typeof liveResult.result === "string" ? liveResult.result : JSON.stringify(liveResult.result);
         }
 
         totalToolResultLength += resultText.length;
         writeToolCall(res, toolName, "done");
+
+        await toolSpan.end("ok", {
+          metadata: { toolName },
+          responsePayload: { resultLength: resultText.length, resultPreview: resultText.slice(0, 500) },
+        });
 
         conversationMessages.push({
           role: "tool",
@@ -228,15 +380,30 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
         totalToolResultLength,
       });
 
+      const synthSpan = await trace.startSpan("ai-service", "llm_stage2_synthesizer", {
+        parentSpanId: rootSpan.spanId,
+        requestPayload: { model: synthModel, messageCount: conversationMessages.length, totalToolResultLength },
+      });
+
+      const synthLitellmSpan = await trace.startSpan("litellm", "chat_completion", {
+        parentSpanId: synthSpan.spanId,
+        requestPayload: { model: synthModel, stream: true, endpoint: "/v1/chat/completions", stage: "synthesizer" },
+      });
       for await (const delta of synthesizeStream({
         model: synthModel,
         systemPrompt: buildSynthesizerPrompt(similarMessages),
-        messages: conversationMessages,
+        messages: compressForSynthesizer(conversationMessages),
         maxTokens: 4096,
       })) {
         writeDelta(res, delta, sessionId);
         fullAssistantContent += delta;
       }
+      await synthLitellmSpan.end("ok", { metadata: { model: synthModel }, responsePayload: { answerLength: fullAssistantContent.length } });
+
+      await synthSpan.end("ok", {
+        metadata: { model: synthModel, highRiskInScope, dataMode },
+        responsePayload: { answerLength: fullAssistantContent.length },
+      });
     } else {
       // No tools called — Stage 1 answer is the final response
       writeDelta(res, fullStage1Content, sessionId);
@@ -275,12 +442,20 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
       }
     });
 
+    await rootSpan.end("ok", {
+      metadata: { toolsUsed, orchestratorModel, synthModel: synthModel ?? null, dataMode },
+      responsePayload: { answerLength: fullAssistantContent.length },
+    });
+    await trace.complete("completed", { toolCount: toolsUsed.length });
+
     writeDone(res);
   } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
     log("error", "chat_handler_error", {
       requestId,
-      error: err instanceof Error ? err.message : String(err),
+      error: errMsg,
     });
+    await trace.complete("error", { errorMessage: errMsg });
     if (!res.writableEnded) {
       writeError(res, "An error occurred processing your request", "internal_error");
       writeDone(res);

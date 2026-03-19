@@ -1,6 +1,6 @@
 # Datto RMM AI Platform — Second Brain
 
-> **Obsidian Knowledge Graph** | Version 2.3.0 | 2026-03-19
+> **Obsidian Knowledge Graph** | Version 2.4.0 | 2026-03-19
 > Navigate this file like a graph. Every `[[Node]]` is a clickable link to a section or sibling note.
 
 ---
@@ -223,6 +223,7 @@ ngx.req.set_header("X-Allowed-Tools", cjson.encode(pl.allowed_tools or {}))
 | `src/cachedQueries.ts` | SQL query handlers for all 28 cacheable tools |
 | `src/dataBrowser.ts` | [[Data Explorer]] REST handlers — read-only SQL queries against cache tables for the admin browser UI |
 | `src/observability.ts` | [[Observability Dashboard]] — 6 admin endpoints aggregating metrics from audit_logs, llm_request_logs, chat_messages, chat_sessions, datto_sync_log |
+| `src/permissions.ts` | SEC-Cache-001: Tool permission check + audit-log utility for cached and live paths |
 | `src/actionProposals.ts` | [[ActionProposal]] state machine — stage/list/confirm/reject/execute write tool proposals (SEC-Write-001) |
 
 **Related nodes:** [[Prompt Builder]] · [[Tool Router]] · [[MCP Bridge]] · [[Chat Request Flow]] · [[Tool Execution Flow]] · [[Chat Messages Table]] · [[RBAC System]] · [[Local Data Cache]] · [[Observability Dashboard]]
@@ -399,6 +400,19 @@ The bridge does NOT trust the `allowedTools` array supplied by the AI container 
 - `datto_cache_users` PK is `email` — Datto user objects have no `uid` field
 - `datto_cache_devices.site_uid` is a logical FK (no DB enforcement) — dropped to prevent sync failures when a device references a site not yet in cache
 - Site↔device relationship is enforced at query level: `cachedListSiteDevices` filters by `site_uid`
+
+**Fuzzy search (pg_trgm):**
+- `cachedListSites()` and `cachedListDevices()` support typo-tolerant lookup via the `siteName` parameter
+- Search cascade: (1) ILIKE substring match → (2) pg_trgm `similarity() > 0.2` fuzzy fallback → (3) explicit "not found"
+- GIN trigram indexes on `datto_cache_sites.name`, `datto_cache_devices.hostname`, `datto_cache_devices.site_name`
+- Tool descriptions instruct the LLM to ALWAYS use filters when looking for specific sites/devices, preventing bulk listing of all records
+- This reduces token usage from ~170K (all 89 sites) to ~2K (single matched site)
+
+**Stage 2 context compression (SEC-015b):**
+- `compressForSynthesizer()` truncates large tool results before sending to Stage 2
+- Tool results > 12K chars are truncated; total context capped at ~120K chars
+- Stage 1 always sees full data for accurate tool chaining; only Stage 2 is compressed
+- Wired into both `chat.ts` (SSE streaming) and `legacyChat.ts` (sync JSON) synthesizer calls
 
 **Admin panel page:** `/admin/data-sync` — shows last sync times, record counts, audit error counts, Sync Now buttons.
 
@@ -586,6 +600,7 @@ sequenceDiagram
 | Layer | Where | What it stops |
 |---|---|---|
 | **1 — Prompt** | [[Prompt Builder]] | Model never sees definitions of unauthorised tools |
+| **1.5 — ai-service gate (SEC-Cache-001)** | `permissions.ts` + `chat.ts` / `legacyChat.ts` / `cachedQueries.ts` | Rejects tool names not in `allowedTools` before any execution — covers both cached and live paths |
 | **2 — Bridge gate (DB-verified)** | [[MCP Bridge]] `index.ts` | Calls auth-service introspect to get DB-sourced allowed_tools; ignores caller-supplied list (SEC-MCP-001) |
 | **3 — MCP registry** | [[MCP Server]] | `Unknown tool: x` error for unregistered names |
 | **4 — Write gate** | [[ActionProposal]] | LLM cannot execute write tools directly; must stage a proposal and wait for user confirmation (SEC-Write-001) |
@@ -749,7 +764,7 @@ readonly → list-sites, get-system-status,
 **Image:** `pgvector/pgvector:pg16`
 **Port:** `5432` (internal only)
 **Volume:** `postgres_data` (named, persists across container restarts)
-**Extensions:** `uuid-ossp`, `vector`
+**Extensions:** `uuid-ossp`, `vector`, `pg_trgm`
 **Database:** `datto_rmm`
 
 > **Full schema reference:** See `DATABASE.md` — every table, column, index, FK, and design decision documented in one place.
@@ -759,7 +774,7 @@ readonly → list-sites, get-system-status,
 - **Chat & LLM:** `chat_sessions`, `chat_messages`, `llm_request_logs`, `llm_routing_config`
 - **Datto Cache:** `datto_sync_log` + 14 `datto_cache_*` tables
 
-**Migrations:** `db/001_extensions.sql` → `db/016_audit_log_rls.sql` (16 numbered migrations + `seed.sql`)
+**Migrations:** `db/001_extensions.sql` → `db/018_fuzzy_search.sql` (18 numbered migrations + `seed.sql`)
 
 | Migration | Purpose |
 |---|---|
@@ -770,6 +785,8 @@ readonly → list-sites, get-system-status,
 | 014_observability | Observability performance indexes |
 | 015_action_proposals | SEC-Write-001: ActionProposal state machine table |
 | 016_audit_log_rls | SEC-Audit-001: Audit log immutability via PostgreSQL RLS |
+| 017_request_traces | Distributed tracing tables for observability spans |
+| 018_fuzzy_search | pg_trgm extension + GIN trigram indexes for fuzzy site/device search |
 
 **Seed:** `db/seed.sql` (4 default users, 4 roles, tool assignments, `tool_policies`, `llm_request_logs`)
 
@@ -1071,6 +1088,26 @@ Sensitive fields (passwords, API keys, secrets) are replaced with `***` in `tool
 **No write tools exist yet.** This infrastructure is in place so the pattern is established before the first write tool is added. The chat pipeline will be updated to produce proposals instead of executing write tools when write tools arrive.
 
 **Related nodes:** [[MCP Bridge]] · [[Datto Credential Isolation]] · [[RBAC System]]
+
+---
+
+## SEC-Cache-001 — Cached Tool Permission Gate
+
+**Problem:** When `dataMode === "cached"`, tool calls executed via `executeCachedTool()` bypassed all permission checks. The MCP Bridge's independent introspect (SEC-MCP-001) only fires for live tools. The LLM could hallucinate or be prompt-injected into calling cached tools outside the user's `allowedTools`.
+
+**Fix:** Three-point enforcement:
+1. **Call-site check** (`chat.ts` + `legacyChat.ts`): `checkAndAuditToolPermission()` from `permissions.ts` validates every tool name against `allowedTools` before execution. Denials are audit-logged with `event_type = "tool_denied"` and returned to the LLM as tool error messages.
+2. **Inner check** (`cachedQueries.ts`): `executeCachedTool()` requires `allowedTools` parameter and throws on mismatch — TypeScript compilation enforces that no caller can skip the check.
+3. **Live pre-flight**: Same check applies to live tools, catching hallucinated names without a bridge round-trip. The bridge's independent introspect check (SEC-MCP-001) remains as the authoritative gate for live tools.
+
+**Source files:**
+- `ai-service/src/permissions.ts` — `isToolAllowed()`, `toolDeniedMessage()`, `checkAndAuditToolPermission()`
+- `ai-service/src/cachedQueries.ts` — `executeCachedTool()` inner guard
+- `ai-service/src/chat.ts` + `legacyChat.ts` — call-site checks
+
+**Latency impact:** Zero for permitted tools (synchronous `Array.includes`). Audit logging on denial is fire-and-forget.
+
+**Related nodes:** [[AI Service]] · [[RBAC System]] · [[Local Data Cache]] · [[Tool Execution Flow]]
 
 ---
 

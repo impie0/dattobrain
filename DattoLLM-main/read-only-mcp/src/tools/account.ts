@@ -22,7 +22,7 @@ export const accountTools: ToolDef[] = [
   },
   {
     name: "list-sites",
-    description: "List all sites in the Datto RMM account. Supports pagination and filtering by site name.",
+    description: "List sites in the Datto RMM account. ALWAYS use the siteName filter when looking for a specific site — this avoids loading all sites. Supports fuzzy matching (handles typos). Only omit siteName when the user wants a full listing.",
     inputSchema: {
       type: "object",
       properties: {
@@ -41,7 +41,7 @@ export const accountTools: ToolDef[] = [
   },
   {
     name: "list-devices",
-    description: "List all devices in the account. Supports filtering by hostname, site, device type, and OS.",
+    description: "List devices in the account. ALWAYS use filters (hostname, siteName, deviceType, operatingSystem) when looking for specific devices — this avoids loading all devices. Supports fuzzy matching on hostname and siteName.",
     inputSchema: {
       type: "object",
       properties: {

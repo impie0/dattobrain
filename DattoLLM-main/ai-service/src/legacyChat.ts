@@ -7,6 +7,7 @@ import { loadHistory, saveMessages } from "./history.js";
 import { callTool } from "./mcpBridge.js";
 import { buildSystemPrompt, buildSynthesizerPrompt } from "./prompt.js";
 import { executeCachedTool, isLiveOnlyTool } from "./cachedQueries.js";
+import { checkAndAuditToolPermission, toolDeniedMessage } from "./permissions.js";
 import {
   getRoutingConfig,
   selectOrchestratorModel,
@@ -14,11 +15,42 @@ import {
   checkHighRiskInScope,
 } from "./llmConfig.js";
 import { llmClient, synthesize } from "./modelRouter.js";
+import { TraceContext } from "./tracing.js";
 
 function log(level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) {
   const line = JSON.stringify({ level, msg, ts: Date.now(), ...extra });
   if (level === "error") process.stderr.write(line + "\n");
   else process.stdout.write(line + "\n");
+}
+
+/**
+ * SEC-015b: Compress conversation messages for Stage 2.
+ * Tool results can be huge (full device lists, audit data). The synthesizer
+ * only needs enough to write a summary. Truncate large tool results to fit
+ * within the target model's context window (~120k chars ≈ 30k tokens safe).
+ */
+const STAGE2_MAX_CHARS = 120_000;
+const TOOL_RESULT_MAX = 12_000;
+
+function compressForSynthesizer(
+  msgs: OpenAI.ChatCompletionMessageParam[]
+): OpenAI.ChatCompletionMessageParam[] {
+  const totalChars = msgs.reduce(
+    (s, m) => s + (typeof m.content === "string" ? m.content.length : 0), 0
+  );
+  if (totalChars <= STAGE2_MAX_CHARS) return msgs;
+
+  log("info", "stage2_context_compression", { totalChars, targetMax: STAGE2_MAX_CHARS });
+  return msgs.map(m => {
+    if (m.role === "tool" && typeof m.content === "string" && m.content.length > TOOL_RESULT_MAX) {
+      return {
+        ...m,
+        content: m.content.slice(0, TOOL_RESULT_MAX) +
+          `\n\n[... truncated from ${m.content.length} chars for synthesis — full data was used in Stage 1]`,
+      };
+    }
+    return m;
+  });
 }
 
 // POST /api/chat — synchronous JSON response for web-app compatibility
@@ -53,21 +85,40 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
 
   const requestId = randomUUID();
 
+  // ── Tracing ─────────────────────────────────────────────────────────────
+  const trace = new TraceContext(pool, requestId);
+  await trace.init({ userId, sessionId, question: text });
+
   try {
+    const rootSpan = await trace.startSpan("ai-service", "incoming_request", {
+      requestPayload: {
+        message: text.slice(0, 500),
+        sessionId,
+        allowedTools,
+        headers: { "x-user-id": userId, "x-user-role": req.headers["x-user-role"] },
+      },
+    });
+
     // Load routing config (60s cached)
+    const cfgSpan = await trace.startSpan("ai-service", "db_routing_config", { parentSpanId: rootSpan.spanId });
     const routingConfig = await getRoutingConfig(pool);
+    await cfgSpan.end("ok", { metadata: { source: "llm_routing_config" } });
 
     // Resolve data mode — prefer explicit session value, else use configured default
+    const sessSpan = await trace.startSpan("ai-service", "db_session_lookup", { parentSpanId: rootSpan.spanId, requestPayload: { sessionId } });
     const sessionRow = await pool.query(
       `SELECT data_mode FROM chat_sessions WHERE id = $1`,
       [sessionId]
     ).catch(() => ({ rows: [] }));
+    await sessSpan.end("ok", { metadata: { found: sessionRow.rows.length > 0, sessionId } });
     const dataMode: "cached" | "live" =
       (sessionRow.rows[0] as { data_mode?: string } | undefined)?.data_mode === "live"
         ? "live"
         : routingConfig.default_data_mode === "live" ? "live" : "cached";
 
-    const history = await loadHistory(sessionId, pool).catch(() => []);
+    const histSpan = await trace.startSpan("ai-service", "db_load_history", { parentSpanId: rootSpan.spanId, requestPayload: { sessionId } });
+    const history = await loadHistory(sessionId, pool).catch(() => [] as OpenAI.ChatCompletionMessageParam[]);
+    await histSpan.end("ok", { metadata: { messageCount: history.length, sessionId } });
     const filteredTools = toolRegistry.filter((t) => allowedTools.includes(t.name));
     const systemPrompt = buildSystemPrompt([]);
 
@@ -88,7 +139,9 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
     }));
 
     // Determine orchestrator model
+    const riskSpan = await trace.startSpan("ai-service", "db_high_risk_check", { parentSpanId: rootSpan.spanId, requestPayload: { toolCount: filteredTools.length } });
     const highRiskInScope = await checkHighRiskInScope(filteredTools.map(t => t.name), pool);
+    await riskSpan.end("ok", { metadata: { highRiskInScope, toolCount: filteredTools.length } });
     const orchestratorModel = selectOrchestratorModel(routingConfig, highRiskInScope);
 
     const toolsUsed: string[] = [];
@@ -97,12 +150,14 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
     let fullStage1Content = "";
 
     // Log the full payload before sending to LLM — capture ID for model update later
+    const logSpan = await trace.startSpan("ai-service", "db_llm_request_log", { parentSpanId: rootSpan.spanId });
     let logRowId: string | undefined;
     await pool.query(
       `INSERT INTO llm_request_logs (session_id, user_id, system_prompt, messages, tool_names, tools_payload, orchestrator_model)
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
       [sessionId, userId, systemPrompt, JSON.stringify(conversationMessages), openaiTools.map((t) => t.function.name), JSON.stringify(openaiTools), orchestratorModel]
     ).then((r: { rows: { id: string }[] }) => { logRowId = r.rows[0]?.id; }).catch(() => {});
+    await logSpan.end("ok", { metadata: { table: "llm_request_logs", logRowId } });
 
     log("info", "stage1_start", { orchestratorModel, requestId });
 
@@ -113,19 +168,42 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
     const CONTEXT_OVERFLOW_CHARS = 100_000; // ~25k tokens, safe limit for Haiku 32k ctx
 
     // ── STAGE 1: Orchestrator — tool selection loop ───────────────────────────
+    let stage1Iteration = 0;
     while (true) {
+      stage1Iteration++;
+      const llmSpan = await trace.startSpan("ai-service", `llm_stage1_iter_${stage1Iteration}`, {
+        parentSpanId: rootSpan.spanId,
+        requestPayload: { model: orchestratorModel, messageCount: conversationMessages.length },
+      });
+
+      const litellmSpan = await trace.startSpan("litellm", "chat_completion", {
+        parentSpanId: llmSpan.spanId,
+        requestPayload: { model: orchestratorModel, stream: false, endpoint: "/v1/chat/completions", stage: "orchestrator" },
+      });
       const completion = await llmClient.chat.completions.create({
         model: orchestratorModel,
         messages: [{ role: "system", content: systemPrompt }, ...conversationMessages],
         max_tokens: 4096,
         tools: openaiTools.length > 0 ? openaiTools : undefined,
       });
+      await litellmSpan.end("ok", { metadata: { model: orchestratorModel, finishReason: completion.choices[0]?.finish_reason }, responsePayload: { toolCallCount: completion.choices[0]?.message.tool_calls?.length ?? 0 } });
 
       const choice = completion.choices[0];
       const assistantMsg = choice.message;
       fullStage1Content += assistantMsg.content ?? "";
 
-      if (choice.finish_reason !== "tool_calls" || !assistantMsg.tool_calls?.length) break;
+      if (choice.finish_reason !== "tool_calls" || !assistantMsg.tool_calls?.length) {
+        await llmSpan.end("ok", {
+          metadata: { model: orchestratorModel, finishReason: choice.finish_reason, toolCallCount: 0 },
+          responsePayload: { textLength: (assistantMsg.content ?? "").length },
+        });
+        break;
+      }
+
+      await llmSpan.end("ok", {
+        metadata: { model: orchestratorModel, finishReason: choice.finish_reason, toolCallCount: assistantMsg.tool_calls.length },
+        responsePayload: { toolCalls: assistantMsg.tool_calls.map(tc => ({ name: tc.function.name, args: tc.function.arguments.slice(0, 200) })) },
+      });
 
       conversationMessages.push({
         role: "assistant",
@@ -135,26 +213,61 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
 
       for (const tc of assistantMsg.tool_calls) {
         const toolName = tc.function.name;
+
+        // SEC-Cache-001: Hard permission gate — reject tool names not in allowedTools
+        const permitted = await checkAndAuditToolPermission(
+          toolName, allowedTools, userId, requestId, pool,
+          dataMode === "cached" && !isLiveOnlyTool(toolName) ? "cached" : "live_preflight"
+        );
+        if (!permitted) {
+          const denySpan = await trace.startSpan("ai-service", "tool_denied", {
+            parentSpanId: rootSpan.spanId,
+            requestPayload: { toolName, sec: "SEC-Cache-001" },
+          });
+          await denySpan.end("error", {
+            metadata: { toolName, reason: "not_in_allowed_tools" },
+            errorMessage: `Tool '${toolName}' denied by SEC-Cache-001`,
+          });
+          conversationMessages.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: toolDeniedMessage(toolName),
+          });
+          continue;
+        }
+
         toolsUsed.push(toolName);
 
         let toolInput: Record<string, unknown>;
         try { toolInput = JSON.parse(tc.function.arguments) as Record<string, unknown>; }
         catch { toolInput = {}; }
 
+        const toolSpan = await trace.startSpan("ai-service", "tool_call", {
+          parentSpanId: rootSpan.spanId,
+          requestPayload: { toolName, toolInput, dataMode, cached: dataMode === "cached" && !isLiveOnlyTool(toolName) },
+        });
+
         let resultText: string;
         if (dataMode === "cached" && !isLiveOnlyTool(toolName)) {
           try {
-            resultText = await executeCachedTool(toolName, toolInput, pool);
+            const cacheSpan = await trace.startSpan("ai-service", "db_cached_query", { parentSpanId: toolSpan.spanId, requestPayload: { toolName, toolInput } });
+            resultText = await executeCachedTool(toolName, toolInput, pool, allowedTools);
+            await cacheSpan.end("ok", { metadata: { toolName, source: "datto_cache" }, responsePayload: { resultLength: resultText.length } });
           } catch {
-            const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken);
+            const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken, trace.traceId, toolSpan.spanId);
             resultText = typeof liveResult.result === "string" ? liveResult.result : JSON.stringify(liveResult.result);
           }
         } else {
-          const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken);
+          const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken, trace.traceId, toolSpan.spanId);
           resultText = typeof liveResult.result === "string" ? liveResult.result : JSON.stringify(liveResult.result);
         }
 
         totalToolResultLength += resultText.length;
+
+        await toolSpan.end("ok", {
+          metadata: { toolName },
+          responsePayload: { resultLength: resultText.length, resultPreview: resultText.slice(0, 500) },
+        });
 
         conversationMessages.push({
           role: "tool",
@@ -184,11 +297,26 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
         totalToolResultLength,
       });
 
+      const synthSpan = await trace.startSpan("ai-service", "llm_stage2_synthesizer", {
+        parentSpanId: rootSpan.spanId,
+        requestPayload: { model: synthModel, messageCount: conversationMessages.length, totalToolResultLength },
+      });
+
+      const synthLitellmSpan = await trace.startSpan("litellm", "chat_completion", {
+        parentSpanId: synthSpan.spanId,
+        requestPayload: { model: synthModel, stream: false, endpoint: "/v1/chat/completions", stage: "synthesizer" },
+      });
       fullAnswer = await synthesize({
         model: synthModel,
         systemPrompt: buildSynthesizerPrompt([]),
-        messages: conversationMessages,
+        messages: compressForSynthesizer(conversationMessages),
         maxTokens: 4096,
+      });
+      await synthLitellmSpan.end("ok", { metadata: { model: synthModel }, responsePayload: { answerLength: fullAnswer.length } });
+
+      await synthSpan.end("ok", {
+        metadata: { model: synthModel, highRiskInScope, dataMode },
+        responsePayload: { answerLength: fullAnswer.length },
       });
     } else {
       // No tools called — Stage 1 answer is the final response
@@ -216,10 +344,17 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
       ).catch(() => {});
     }
 
+    await rootSpan.end("ok", {
+      metadata: { toolsUsed, orchestratorModel, synthModel: synthModel ?? null, dataMode },
+      responsePayload: { answerLength: fullAnswer.length },
+    });
+    await trace.complete("completed", { toolCount: toolsUsed.length });
+
     res.json({ conversation_id: sessionId, answer: fullAnswer });
   } catch (err) {
     const raw = err instanceof Error ? err.message : String(err);
     log("error", "legacy_chat_error", { error: raw, requestId });
+    await trace.complete("error", { errorMessage: raw });
 
     let userMessage = "Chat request failed";
     if (raw.includes("credit balance is too low")) {

@@ -80,9 +80,9 @@ Both stages use the **OpenAI SDK** (`llmClient`) via LiteLLM's `/v1/chat/complet
 | Legacy (sync) | `POST /api/chat` | `{conversation_id, answer}` | `legacyChat.ts` |
 | Streaming (SSE) | `POST /chat` | `event: delta` stream | `chat.ts` |
 
-> [!danger] SEC-003 — Synchronous loop cannot support write tools
-> The current loop has no mid-execution pause for human approval. Adding write tools (reboot, script, password reset) to this loop means the LLM executes destructive operations without confirmation.
-> **Fix:** Action staging pattern required — Stage 1 returns `ActionProposal`, user confirms, then write tool executes. See [[SECURITY_FINDINGS#SEC-003]] and [[ROADMAP]].
+> [!success] SEC-003 / SEC-Write-001 — Write tool staging (RESOLVED)
+> The [[ActionProposal]] state machine (`ai-service/src/actionProposals.ts`, migration `db/015_action_proposals.sql`) ensures write tools cannot execute directly. The LLM stages a proposal → user confirms within 15 min → platform executes. No write tools exist yet, but the infrastructure is in place.
+> Additionally, SEC-Cache-001 adds a hard permission gate (`permissions.ts`) that validates every tool name against `allowedTools` before any execution — covering both cached and live paths.
 
 ## Related Nodes
 

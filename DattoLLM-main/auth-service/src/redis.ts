@@ -14,7 +14,7 @@
  *     — Used by forced-revoke (SEC-008) to revoke all tokens for a user at once.
  */
 
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 
 const ACCESS_TOKEN_TTL_SECONDS = 3600;
 

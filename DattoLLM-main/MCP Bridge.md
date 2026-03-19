@@ -15,12 +15,14 @@ description: Permission gate between AI Service and MCP Server — enforces allo
 
 **Build:** `./mcp-bridge`
 **Port:** `4001` (internal only)
-**Key env vars:** `MCP_SERVER_URL`, `MCP_INTERNAL_SECRET`
+**Key env vars:** `MCP_SERVER_URL`, `MCP_INTERNAL_SECRET`, `AUTH_SERVICE_URL`
 
-> [!danger] SEC-001 — Trusts caller-supplied `allowedTools`
-> The bridge validates tool calls against the `allowedTools` array supplied by the AI Service — it does **not** independently verify permissions against the DB. A compromised AI container can forge this array.
-> For read tools this is a defense-in-depth gap. For write tools this is catastrophic.
-> **Fix:** Bridge must query Redis/DB using `userId` and ignore caller-supplied permissions. See [[SECURITY_FINDINGS#SEC-001]].
+> [!success] SEC-MCP-001 — Independent permission verification (RESOLVED)
+> The bridge no longer trusts the `allowedTools` array supplied by the AI Service. Instead:
+> - **Internal service path** (e.g. sync scheduler): `X-Internal-Secret` header matches `MCP_INTERNAL_SECRET` → caller is trusted, supplied `allowedTools` accepted.
+> - **User request path**: bridge receives `jwtToken` from request body, calls `AUTH_SERVICE_URL/auth/introspect`, and uses the DB-sourced `allowed_tools` from that response. A compromised AI container cannot forge permissions.
+>
+> Additionally, SEC-Cache-001 adds a Layer 1.5 permission gate inside ai-service that validates every tool name against `allowedTools` BEFORE execution for both cached and live paths.
 
 ## Dependencies
 
@@ -33,8 +35,9 @@ File: `mcp-bridge/src/index.ts`
 
 | Function | File | Purpose |
 |---|---|---|
-| `POST /tool-call` | `index.ts` | Validate fields → `checkPermission` → `callMcpTool` |
-| `checkPermission` | `validate.ts` | Returns 403 if `toolName` not in `allowedTools` |
+| `POST /tool-call` | `index.ts` | Validate fields → `resolveAllowedTools` → `checkPermission` → `callMcpTool` |
+| `resolveAllowedTools` | `index.ts` | SEC-MCP-001: Introspect JWT via auth-service to get DB-sourced `allowedTools`; trusts caller only if `X-Internal-Secret` matches |
+| `checkPermission` | `validate.ts` | Returns 403 if `toolName` not in DB-sourced `allowedTools` |
 | `callMcpTool` | `mcpClient.ts` | POST JSON-RPC to MCP Server, retry 3× on 503 |
 
 ## Retry Policy

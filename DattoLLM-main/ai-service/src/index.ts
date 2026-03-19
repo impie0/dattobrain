@@ -29,6 +29,9 @@ import {
   handleObsOverview, handleObsLlm, handleObsTools,
   handleObsMcp, handleObsChat, handleObsCache,
 } from "./observability.js";
+import {
+  handleListTraces, handleGetTrace, handleIngestSpans,
+} from "./traceHandlers.js";
 
 function log(level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) {
   const line = JSON.stringify({ level, msg, ts: Date.now(), ...extra });
@@ -308,6 +311,13 @@ app.get("/api/admin/observability/mcp",      adminOnly, (req, res) => handleObsM
 app.get("/api/admin/observability/chat",     adminOnly, (req, res) => handleObsChat(req, res, pool));
 app.get("/api/admin/observability/cache",    adminOnly, (req, res) => handleObsCache(req, res, pool));
 
+// ── Admin — request traces ─────────────────────────────────────────────────
+app.get("/api/admin/observability/traces",          adminOnly, (req, res) => handleListTraces(req, res, pool));
+app.get("/api/admin/observability/traces/:traceId", adminOnly, (req, res) => handleGetTrace(req, res, pool));
+
+// ── Internal — span ingestion from mcp-bridge ──────────────────────────────
+app.post("/api/internal/trace-spans", (req, res) => handleIngestSpans(req, res, pool));
+
 // ── Platform SSE route ─────────────────────────────────────────────────────
 app.post("/chat", handleChat);
 
@@ -319,4 +329,18 @@ const port = Number(process.env["PORT"] ?? 6001);
 app.listen(port, () => {
   log("info", `ai-service listening on :${port}`);
   startScheduledSync(pool);
+
+  // 30-day trace cleanup — runs every hour
+  setInterval(async () => {
+    try {
+      const result = await pool.query(
+        `DELETE FROM request_traces WHERE created_at < NOW() - INTERVAL '30 days'`
+      );
+      if (result.rowCount && result.rowCount > 0) {
+        log("info", "trace_cleanup", { deleted: result.rowCount });
+      }
+    } catch (err) {
+      log("error", "trace_cleanup_error", { error: String(err) });
+    }
+  }, 3_600_000);
 });

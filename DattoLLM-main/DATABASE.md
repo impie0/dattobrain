@@ -1,6 +1,6 @@
 # Database Schema Reference
 
-> **Datto RMM AI Platform** | PostgreSQL 16 + pgvector | 28 tables across 3 domains
+> **Datto RMM AI Platform** | PostgreSQL 16 + pgvector + pg_trgm | 28 tables across 3 domains
 > This file is the authoritative reference for every table, column, index, FK, and design decision in the platform database.
 
 ---
@@ -370,10 +370,11 @@ erDiagram
 
 ## 3 Extensions & Migrations
 
-**Extensions** (migration 001):
+**Extensions** (migrations 001, 018):
 ```sql
 uuid-ossp   -- uuid_generate_v4() for all PKs
 vector      -- pgvector extension for 1024-dim embeddings
+pg_trgm     -- trigram similarity for fuzzy text search (typo-tolerant site/device lookup)
 ```
 
 **Migration history** — apply in order:
@@ -393,6 +394,12 @@ vector      -- pgvector extension for 1024-dim embeddings
 | `011_sync_log_errors.sql` | Adds `audit_errors`, `last_api_error` to `datto_sync_log` |
 | `012_llm_routing_config.sql` | `llm_routing_config` (7 default rows) |
 | `013_llm_logs_models.sql` | Adds `orchestrator_model`, `synthesizer_model`, `tools_called` to `llm_request_logs` |
+| `014_hnsw_index.sql` | Drops IVFFlat, creates HNSW index on `chat_messages.embedding` (SEC-014) |
+| `014_observability.sql` | 10 performance indexes for observability time-windowed aggregations |
+| `015_action_proposals.sql` | `action_proposals` table — write tool staging state machine (SEC-Write-001) |
+| `016_audit_log_rls.sql` | Audit log immutability via PostgreSQL RLS (SEC-Audit-001) |
+| `017_request_traces.sql` | Distributed tracing tables for observability spans |
+| `018_fuzzy_search.sql` | `pg_trgm` extension + GIN trigram indexes on `datto_cache_sites.name`, `datto_cache_devices.hostname`, `datto_cache_devices.site_name` |
 | `seed.sql` | 4 default users, 4 roles, tool assignments, tool_policies, `llm_request_logs` table |
 
 > `tool_policies`, `approvals`, `user_tool_overrides`, and `llm_request_logs` are created in `seed.sql`, not numbered migrations.
@@ -758,7 +765,7 @@ settings_data         jsonb               -- raw get-site settings response
 synced_at             timestamptz DEFAULT now()
 ```
 
-**Index:** `name` for search
+**Indexes:** `name` B-tree for exact search; `name gin_trgm_ops` GIN for fuzzy/trigram search (migration 018)
 
 **Referenced by (FK):** `datto_cache_site_variables`, `datto_cache_site_filters`
 **Logical reference from (no FK enforced):** `datto_cache_devices.site_uid`
@@ -824,7 +831,7 @@ data             jsonb NOT NULL
 synced_at        timestamptz DEFAULT now()
 ```
 
-**Indexes:** `hostname`, `site_uid`, `online`, `device_class`, `operating_system`
+**Indexes:** `hostname`, `site_uid`, `online`, `device_class`, `operating_system` (B-tree); `hostname gin_trgm_ops`, `site_name gin_trgm_ops` (GIN trigram — migration 018)
 
 **Why no FK on `site_uid`?** Migration 010 dropped it. Sync processes devices independently of sites — a device may reference a site UID that hasn't been synced yet. The FK caused violations and aborted device syncs. Relationship is enforced at query level: `cachedListSiteDevices` filters `WHERE site_uid = $1`.
 
@@ -1065,6 +1072,9 @@ datto_sync_log  (independent, append-only)
 | `datto_cache_alerts` | `site_uid` | B-tree | Alerts by site |
 | `datto_cache_alerts` | `resolved` | B-tree | Open/resolved filter |
 | `datto_cache_alerts` | `priority` | B-tree | Priority filter |
+| `datto_cache_sites` | `name` | GIN (gin_trgm_ops) | Fuzzy site name search (migration 018) |
+| `datto_cache_devices` | `hostname` | GIN (gin_trgm_ops) | Fuzzy hostname search (migration 018) |
+| `datto_cache_devices` | `site_name` | GIN (gin_trgm_ops) | Fuzzy site name filter on devices (migration 018) |
 
 ---
 
@@ -1103,4 +1113,4 @@ The raw Datto API response is stored alongside the indexed scalar columns. This 
 ---
 
 *DATABASE.md — Datto RMM AI Platform — internal use only.*
-*Reflects schema as of migration 013 (2026-03-18). Update this file whenever a new migration is added.*
+*Reflects schema as of migration 018 (2026-03-19). Update this file whenever a new migration is added.*

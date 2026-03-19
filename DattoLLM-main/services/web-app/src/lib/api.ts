@@ -665,6 +665,68 @@ export async function getObsCache(): Promise<ObsCache> {
   return obsGet("cache") as Promise<ObsCache>;
 }
 
+// ── Request Traces ───────────────────────────────────────────────────────
+
+export interface TraceListItem {
+  id: string;
+  sessionId: string | null;
+  userId: string | null;
+  username: string | null;
+  question: string | null;
+  status: string;
+  toolCount: number;
+  totalDurationMs: number | null;
+  errorMessage: string | null;
+  createdAt: string;
+  completedAt: string | null;
+  spanCount: number;
+}
+
+export interface TraceSpanNode {
+  id: string;
+  traceId: string;
+  parentSpanId: string | null;
+  service: string;
+  operation: string;
+  status: string;
+  startedAt: string;
+  endedAt: string | null;
+  durationMs: number | null;
+  requestPayload: unknown;
+  responsePayload: unknown;
+  metadata: Record<string, unknown> | null;
+  errorMessage: string | null;
+  children: TraceSpanNode[];
+}
+
+export interface TraceDetail {
+  trace: TraceListItem;
+  spans: TraceSpanNode[];
+}
+
+export async function getTraceList(params?: { page?: number; pageSize?: number; search?: string; status?: string }): Promise<{ traces: TraceListItem[]; total: number; page: number; pageSize: number }> {
+  const token = getToken();
+  if (!token) throw new Error("Not authenticated");
+  const q = params ? "?" + new URLSearchParams(
+    Object.entries(params).filter(([, v]) => v !== undefined && v !== "").map(([k, v]) => [k, String(v)])
+  ).toString() : "";
+  const res = await fetch(`${API_BASE}/api/admin/observability/traces${q}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`Traces API error: ${res.status}`);
+  return res.json();
+}
+
+export async function getTraceDetail(traceId: string): Promise<TraceDetail> {
+  const token = getToken();
+  if (!token) throw new Error("Not authenticated");
+  const res = await fetch(`${API_BASE}/api/admin/observability/traces/${encodeURIComponent(traceId)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`Trace detail API error: ${res.status}`);
+  return res.json();
+}
+
 export async function rejectRequest(id: string): Promise<void> {
   const token = getToken();
   if (!token) throw new Error("Not authenticated");

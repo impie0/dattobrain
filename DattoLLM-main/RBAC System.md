@@ -4,21 +4,24 @@ tags:
   - security
   - rbac
 type: Module
-description: Three-layer role-based access control — permissions computed at login, sealed into JWT, enforced at prompt, bridge, and MCP layers
+description: Five-layer role-based access control — permissions computed at login, sealed into JWT, enforced at prompt, ai-service gate, bridge, MCP registry, and write gate layers
 ---
 
 # RBAC System
 
 > Part of the [[Datto RMM AI Platform|claude]] knowledge graph · **Module** node
 
-**Purpose:** Three-layer role-based access control ensuring users can only call tools they are authorised for. Permissions computed once at login and sealed into the JWT.
+**Purpose:** Five-layer role-based access control ensuring users can only call tools they are authorised for. Permissions computed once at login and sealed into the JWT.
 
 ## Files
 
 - `auth-service/src/handlers.ts` — query + embed into JWT
-- `mcp-bridge/src/validate.ts` — runtime gate
-- `ai-service/src/legacyChat.ts` + `chat.ts` — prompt filter
+- `ai-service/src/permissions.ts` — SEC-Cache-001: hard permission gate for cached and live paths
+- `ai-service/src/legacyChat.ts` + `chat.ts` — prompt filter + SEC-Cache-001 call-site checks
+- `ai-service/src/cachedQueries.ts` — SEC-Cache-001: inner guard on `executeCachedTool()`
+- `mcp-bridge/src/index.ts` — SEC-MCP-001: independent introspect + `checkPermission()`
 - `ai-service/src/toolRegistry.ts` — re-export shim; definitions in `src/tools/` domain files (ARCH-002)
+- `ai-service/src/actionProposals.ts` — SEC-Write-001: write tool staging state machine
 
 ## Flow
 
@@ -52,13 +55,15 @@ readonly → list-sites, get-system-status,
            get-rate-limit, get-pagination-config  (4 tools)
 ```
 
-## Three Permission Layers
+## Five Permission Layers
 
 | Layer | Where | What it stops |
 |---|---|---|
 | **1 — Prompt** | [[Prompt Builder]] | Model never sees definitions of unauthorised tools |
-| **2 — Bridge gate** | [[MCP Bridge]] `validate.ts` | 403 on any tool not in `allowedTools` |
+| **1.5 — ai-service gate (SEC-Cache-001)** | `permissions.ts` + `chat.ts` / `legacyChat.ts` / `cachedQueries.ts` | Rejects tool names not in `allowedTools` before any execution — covers both cached and live paths |
+| **2 — Bridge gate (SEC-MCP-001)** | [[MCP Bridge]] `index.ts` | Calls auth-service introspect for DB-sourced `allowedTools`; ignores caller-supplied list |
 | **3 — MCP registry** | [[MCP Server]] | `Unknown tool: x` error for unregistered names |
+| **4 — Write gate (SEC-Write-001)** | [[ActionProposal]] | Write tools must be staged as a proposal and confirmed by the user before execution |
 
 ## Called By
 

@@ -329,6 +329,15 @@ export default function ObservabilityPage() {
             { label: "Live (24h)", value: `${data?.cacheMode["live"] ?? 0}` },
           ]}
         />
+        <DrillCard
+          href="/admin/observability/traces"
+          title="Request Traces"
+          description="Full request journey with payloads at every hop"
+          metrics={[
+            { label: "Requests 1h", value: data?.requests.last1h ?? "—" },
+            { label: "Tools 1h", value: data?.toolCalls.last1h ?? "—" },
+          ]}
+        />
       </div>
     </div>
   );

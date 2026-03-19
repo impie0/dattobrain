@@ -11,17 +11,14 @@
             "id": "d76661bd31ca59e6",
             "type": "leaf",
             "state": {
-              "type": "canvas",
+              "type": "markdown",
               "state": {
-                "file": "DattoLLM-main/Architecture.canvas",
-                "viewState": {
-                  "x": 365,
-                  "y": 249.5625,
-                  "zoom": 0
-                }
+                "file": "DattoLLM-main/ARCHITECTURE.md",
+                "mode": "source",
+                "source": false
               },
-              "icon": "lucide-layout-dashboard",
-              "title": "Architecture"
+              "icon": "lucide-file",
+              "title": "ARCHITECTURE"
             }
           }
         ]
@@ -188,17 +185,21 @@
   },
   "active": "d76661bd31ca59e6",
   "lastOpenFiles": [
+    "DattoLLM-main/RBAC System.md.tmp.62836.1773927426195",
+    "DattoLLM-main/RBAC System.md.tmp.62836.1773927420580",
+    "DattoLLM-main/ARCHITECTURE.md.tmp.62836.1773927336721",
+    "DattoLLM-main/ARCHITECTURE.md.tmp.62836.1773927284298",
+    "DattoLLM-main/Architecture.canvas",
+    "DattoLLM-main/SEC-CACHE-001-PLAN.md",
+    "DattoLLM-main/ai-service/src/permissions.ts",
+    "DattoLLM-main/FUZZY-SEARCH-PLAN.md",
+    "DattoLLM-main/CLAUDE.md.tmp.62836.1773924427310",
+    "DattoLLM-main/CLAUDE.md",
+    "DattoLLM-main/read-only-mcp/src/tools/account.ts.tmp.62836.1773924352127",
+    "DattoLLM-main/db/018_fuzzy_search.sql",
+    "DattoLLM-main/db/018_fuzzy_search.sql.tmp.62836.1773924294211",
     "DattoLLM-main/auth-service/src/handlers.ts.tmp.77464.1773878028522",
     "DattoLLM-main/auth-service/src/handlers.ts.tmp.77464.1773878019117",
-    "DattoLLM-main/claude.md.tmp.77464.1773877776612",
-    "DattoLLM-main/claude.md.tmp.77464.1773877767261",
-    "DattoLLM-main/docker-compose.yml.tmp.77464.1773877758916",
-    "DattoLLM-main/services/apisix/apisix.yaml.tmp.77464.1773877749180",
-    "DattoLLM-main/services/apisix/apisix.yaml.tmp.77464.1773877724661",
-    "DattoLLM-main/services/apisix/apisix.yaml.tmp.77464.1773877719912",
-    "DattoLLM-main/claude.md.tmp.78344.1773877584649",
-    "DattoLLM-main/claude.md.tmp.78344.1773877579366",
-    "DattoLLM-main/claude.md.tmp.78344.1773877569264",
     "DattoLLM-main/connections/MCP Server to Datto.md",
     "DattoLLM-main/connections/Auth to PostgreSQL.md",
     "DattoLLM-main/connections/MCP Bridge to MCP Server.md",
@@ -214,7 +215,6 @@
     "DattoLLM-main/SECURITY_FINDINGS.md",
     "DattoLLM-main/ROADMAP.md",
     "DattoLLM-main/Write Tool State Machine.md",
-    "DattoLLM-main/Architecture.canvas",
     "DattoLLM-main/Home.md",
     "DattoLLM-main/Prompt Builder.md",
     "AGENTS.md"

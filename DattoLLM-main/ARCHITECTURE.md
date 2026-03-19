@@ -1,7 +1,7 @@
 # Architecture Documentation
 ## AI-Powered Datto RMM Platform via MCP
 
-**Version:** 2.0.0
+**Version:** 2.4.0
 **Date:** 2026-03-19
 **Status:** Production
 
@@ -51,7 +51,7 @@ This platform provides an AI-powered conversational interface over the Datto RMM
 | **MCP Bridge** | `mcp-bridge` | HTTP client that enforces the `allowed_tools` permission gate and forwards tool calls to MCP Server. |
 | **MCP Server** | `mcp-server` | The only container with Datto credentials. Exposes 37 read-only GET tools over HTTP (MCP protocol). |
 | **PgBouncer** | `pgbouncer` | Connection pooler (session mode) sitting in front of PostgreSQL. Absorbs reconnect storms; required for PostgreSQL advisory locks (sync distributed lock). |
-| **PostgreSQL + pgvector** | `postgres` | Stores users, roles, tool permissions, chat history + embeddings, refresh tokens, audit logs, Datto data cache. |
+| **PostgreSQL + pgvector + pg_trgm** | `postgres` | Stores users, roles, tool permissions, chat history + embeddings, refresh tokens, audit logs, Datto data cache. Extensions: `uuid-ossp`, `vector`, `pg_trgm`. |
 | **Redis** | `redis` | JWT revocation set (`revoked_jtis:<jti>`), JTI tracking per user (`user_jtis:<userId>`), API Gateway rate-limit counters. |
 | **etcd** | `etcd` | Configuration store for APISIX (routes, upstreams, consumers, plugins). |
 | **Zipkin** | `zipkin` | Distributed tracing. APISIX reports all request spans. |
@@ -366,13 +366,15 @@ flowchart TD
 
 The AI model is not "told" what it cannot use. It is only ever **shown** what it can use. The tool definitions placed into the system prompt are the complete universe of tools the model knows about for that request. Tools not in `allowed_tools` are never described to the model — they have no name, no description, no parameters. The model has no mechanism to call something it has never been told exists.
 
-This is enforced in three layers:
+This is enforced in five layers:
 
 | Layer | What happens | Can be bypassed? |
 |---|---|---|
-| **Prompt construction** (AI Service) | Only `allowed_tools` definitions are written into the system prompt | No — the model never sees other tools |
-| **MCP Bridge gate** | Every `ToolCallRequest` is checked against `allowed_tools` before forwarding | No — request is dropped in-process before reaching MCP |
-| **MCP Server registration** | Only 37 read-only tools are registered; unknown tool names return an error | No — server has no handler for unknown tools |
+| **1 — Prompt construction** (AI Service) | Only `allowed_tools` definitions are written into the system prompt | No — the model never sees other tools |
+| **1.5 — AI Service gate** (SEC-Cache-001) | `checkAndAuditToolPermission()` validates tool name against `allowedTools` before any execution (cached or live) | No — check is synchronous `Array.includes`; denials audit-logged |
+| **2 — MCP Bridge gate** (SEC-MCP-001) | Bridge calls auth-service introspect for DB-sourced permissions; ignores caller-supplied `allowedTools` | No — independently verified from DB |
+| **3 — MCP Server registration** | Only 37 read-only tools are registered; unknown tool names return an error | No — server has no handler for unknown tools |
+| **4 — Write gate** (SEC-Write-001) | Write tools must be staged as ActionProposal; user confirms before execution | No — state machine enforced in DB |
 
 ### 5.3 Role-to-Tool Mapping Examples
 
@@ -1022,29 +1024,37 @@ stateDiagram-v2
     Expired --> [*]: Refresh token also expired (7 days)\nUser must log in again
 ```
 
-### 10.2 RBAC Tool Filtering — Three Layers
+### 10.2 RBAC Tool Filtering — Five Layers
 
-The tool permission system is enforced at three independent layers. All three must pass for a tool call to succeed.
+The tool permission system is enforced at five independent layers. All applicable layers must pass for a tool call to succeed.
 
 ```mermaid
 flowchart LR
     subgraph "Layer 1 — Prompt Construction"
         P1["AI Service\nBuilds LLM system prompt\nInserts ONLY allowed_tools definitions\nOther tools are invisible to the model"]
     end
-    subgraph "Layer 2 — MCP Bridge Gate"
-        P2["MCP Bridge\nChecks tool name against\nallowed_tools from JWT\nRejects unknown tools before\nreaching MCP Server"]
+    subgraph "Layer 1.5 — AI Service Gate (SEC-Cache-001)"
+        P15["permissions.ts\nHard check: toolName in allowedTools?\nCovers both cached and live paths\nAudit-logs denials"]
+    end
+    subgraph "Layer 2 — MCP Bridge Gate (SEC-MCP-001)"
+        P2["MCP Bridge\nIndependently verifies via\nauth-service introspect\nIgnores caller-supplied allowedTools"]
     end
     subgraph "Layer 3 — MCP Server Registration"
         P3["MCP Server\nOnly 37 tools registered\nUnknown tool name →\nreturns error, no handler exists"]
     end
-    P1 --> P2 --> P3
+    subgraph "Layer 4 — Write Gate (SEC-Write-001)"
+        P4["ActionProposal\nWrite tools cannot execute directly\nMust be staged + user-confirmed"]
+    end
+    P1 --> P15 --> P2 --> P3 --> P4
 ```
 
 | Layer | Enforced by | What it stops |
 |---|---|---|
-| Prompt construction | AI Service | Model never learns about tools it cannot use — cannot attempt to call them |
-| MCP Bridge check | MCP Bridge | Defence-in-depth — catches any hallucinated or injected tool names |
-| MCP Server registration | MCP Server | Absolute floor — even a compromised bridge cannot invoke a non-existent tool |
+| 1 — Prompt construction | AI Service | Model never learns about tools it cannot use — cannot attempt to call them |
+| 1.5 — AI Service gate (SEC-Cache-001) | `permissions.ts` + `chat.ts` / `legacyChat.ts` / `cachedQueries.ts` | Rejects tool names not in `allowedTools` before any execution — covers both cached and live paths |
+| 2 — Bridge gate (SEC-MCP-001) | MCP Bridge `index.ts` | Calls auth-service introspect for DB-sourced `allowedTools`; ignores caller-supplied list |
+| 3 — MCP Server registration | MCP Server | Absolute floor — even a compromised bridge cannot invoke a non-existent tool |
+| 4 — Write gate (SEC-Write-001) | ActionProposal | Write tools must be staged as a proposal and confirmed by the user before execution |
 
 **Role-to-tool mapping:**
 
@@ -1566,7 +1576,30 @@ If a cached query returns no data (cache empty, sync not yet run), the AI Servic
 - Record counts per cache table (sites, devices, audited devices, software entries, ESXi hosts, printers, open/resolved alerts, users, components, filters)
 - **Sync Now — Full** and **⚡ Sync Alerts** buttons (polls until complete)
 
-### 14.11 DB Migrations
+### 14.11 Fuzzy Search (pg_trgm)
+
+`cachedListSites()` and `cachedListDevices()` support typo-tolerant lookup via the `siteName` and `hostname` parameters using a two-stage cascade:
+
+1. **ILIKE substring match** — fast, exact substring
+2. **pg_trgm `similarity() > 0.2` fuzzy fallback** — handles typos (e.g. "rojlig" → "Rohlig", similarity = 0.4)
+3. **Explicit "not found"** — returned if both stages find nothing
+
+**GIN trigram indexes** (migration `db/018_fuzzy_search.sql`):
+- `datto_cache_sites.name gin_trgm_ops`
+- `datto_cache_devices.hostname gin_trgm_ops`
+- `datto_cache_devices.site_name gin_trgm_ops`
+
+Tool descriptions in `ai-service/src/tools/account.ts` and `read-only-mcp/src/tools/account.ts` instruct the LLM to ALWAYS use filters when looking for specific sites/devices, preventing bulk listing of all records. This reduces token usage from ~170K (all 89 sites) to ~2K (single matched site).
+
+### 14.12 Stage 2 Context Compression (SEC-015b)
+
+`compressForSynthesizer()` truncates large tool results before sending to Stage 2 (synthesizer):
+- Tool results > 12K chars are truncated with a `[... truncated]` note
+- Total context capped at ~120K chars
+- Stage 1 always sees full data for accurate tool chaining; only Stage 2 is compressed
+- Wired into both `chat.ts` (SSE streaming) and `legacyChat.ts` (sync JSON) synthesizer calls
+
+### 14.13 DB Migrations
 
 | Migration | Purpose |
 |---|---|
@@ -1574,8 +1607,9 @@ If a cached query returns no data (cache empty, sync not yet run), the AI Servic
 | `db/009_fix_users_cache.sql` | Drop + recreate `datto_cache_users` with `email` as PK |
 | `db/010_loosen_device_site_fk.sql` | Drop FK constraint on `datto_cache_devices.site_uid` |
 | `db/011_sync_log_errors.sql` | Add `audit_errors` + `last_api_error` to `datto_sync_log` |
+| `db/018_fuzzy_search.sql` | `pg_trgm` extension + GIN trigram indexes for fuzzy site/device search |
 
-### 14.12 Data Explorer
+### 14.14 Data Explorer
 
 An admin-only browser UI for navigating the local cache directly, without the AI or MCP involved.
 
@@ -1712,6 +1746,27 @@ Stored in `llm_routing_config` DB table (migration `db/012_llm_routing_config.sq
 | `ai-service/src/tools/system.ts` | 3 system tool definitions (ARCH-002) |
 | `ai-service/src/tools/index.ts` | Assembles full `toolRegistry` array from domain modules; re-exports `ToolDef` type (ARCH-002) |
 
+### New Files (v2.4.0 — Fuzzy search + SEC-Cache-001)
+
+| File | Purpose |
+|---|---|
+| `ai-service/src/permissions.ts` | SEC-Cache-001: `isToolAllowed()`, `toolDeniedMessage()`, `checkAndAuditToolPermission()` — shared permission check + audit-log utility for cached and live paths |
+| `db/017_request_traces.sql` | Migration: distributed tracing tables for observability spans |
+| `db/018_fuzzy_search.sql` | Migration: `pg_trgm` extension + GIN trigram indexes on `datto_cache_sites.name`, `datto_cache_devices.hostname`, `datto_cache_devices.site_name` |
+| `SEC-CACHE-001-PLAN.md` | Complete architectural flow document for the cached tool permission gate fix |
+| `FUZZY-SEARCH-PLAN.md` | Complete architectural flow document for fuzzy search + context overflow fix |
+
+### Modified Files (v2.4.0)
+
+| File | Change |
+|---|---|
+| `ai-service/src/cachedQueries.ts` | `cachedListSites()` ILIKE+fuzzy cascade for `siteName`; `cachedListDevices()` fuzzy `siteName` filter; `executeCachedTool()` requires `allowedTools` parameter with inner guard (SEC-Cache-001) |
+| `ai-service/src/chat.ts` | SEC-Cache-001 permission check before tool execution; `compressForSynthesizer()` wired into synthesizer; `allowedTools` passed to `executeCachedTool()` |
+| `ai-service/src/legacyChat.ts` | SEC-Cache-001 permission check; `compressForSynthesizer()` wired into synthesizer; `allowedTools` passed to `executeCachedTool()` |
+| `ai-service/src/sse.ts` | Added `"denied"` to `writeToolCall` status union type |
+| `ai-service/src/tools/account.ts` | `list-sites` and `list-devices` descriptions instruct LLM to ALWAYS use filters; document fuzzy matching support |
+| `read-only-mcp/src/tools/account.ts` | Same description changes as ai-service for live mode parity |
+
 ### Modified Files (v2.0.0)
 
 | File | Change |
@@ -1736,4 +1791,4 @@ Stored in `llm_routing_config` DB table (migration `db/012_llm_routing_config.sq
 ---
 
 *Document generated for the Datto RMM AI Platform — internal use only.*
-*Version 2.0.0 — Phase 0 security hardening: PgBouncer (SEC-010), JTI revocation (SEC-002), forced-revoke (SEC-008), rate limiting (SEC-006), sync lock (SEC-011), context overflow guard (SEC-015), alert staleness indicator (SEC-012), HNSW index migration (SEC-014), sync health endpoint (SEC-016), toolRegistry domain split (ARCH-002).*
+*Version 2.4.0 — Phase 0 security hardening + fuzzy search + cached permission gate: PgBouncer (SEC-010), JTI revocation (SEC-002), forced-revoke (SEC-008), rate limiting (SEC-006), sync lock (SEC-011), context overflow guard (SEC-015), alert staleness indicator (SEC-012), HNSW index migration (SEC-014), sync health endpoint (SEC-016), toolRegistry domain split (ARCH-002), pg_trgm fuzzy search (018), Stage 2 compression (SEC-015b), cached tool permission gate (SEC-Cache-001), ActionProposal write gate (SEC-Write-001).*
