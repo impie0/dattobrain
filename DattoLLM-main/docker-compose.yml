@@ -149,6 +149,7 @@ services:
       MCP_BRIDGE_URL: http://mcp-bridge:4001
       EMBEDDING_SERVICE_URL: http://embedding-service:7001
       LITELLM_URL: http://litellm:4000
+      OLLAMA_URL: http://ollama:11434          # Stage 7: direct embed calls bypass LiteLLM
       AUTH_SERVICE_URL: http://auth-service:5001  # SEC-008: forced-revoke proxy
     ports:
       - "127.0.0.1:6001:6001"  # dev only — loopback only, not 0.0.0.0

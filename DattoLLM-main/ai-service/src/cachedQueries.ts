@@ -5,6 +5,7 @@
  */
 
 import type { Pool } from "pg";
+import { semanticSearch } from "./embeddings.js";
 
 const CACHED_NOTE = (syncedAt: string | null) =>
   `\n\n[Data from local cache — last synced: ${syncedAt ?? "unknown"}]`;
@@ -476,8 +477,15 @@ const LIVE_ONLY_TOOLS = new Set([
   "get-activity-logs", "get-system-status", "get-rate-limit", "get-pagination-config",
 ]);
 
+/** Tools that are always local (vector DB / AI-service internals) — never forwarded to MCP bridge */
+const LOCAL_ONLY_TOOLS = new Set(["semantic-search"]);
+
 export function isLiveOnlyTool(toolName: string): boolean {
   return LIVE_ONLY_TOOLS.has(toolName);
+}
+
+export function isLocalOnlyTool(toolName: string): boolean {
+  return LOCAL_ONLY_TOOLS.has(toolName);
 }
 
 /**
@@ -535,6 +543,17 @@ export async function executeCachedTool(
     case "get-fleet-status":        return cachedGetFleetStatus(db);
     case "list-site-summaries":     return cachedListSiteSummaries(db);
     case "list-critical-alerts":    return cachedListCriticalAlerts(db);
+
+    // Stage 7: Semantic vector search (always local)
+    case "semantic-search": {
+      const result = await semanticSearch(
+        db,
+        args["query"] as string,
+        args["entityTypes"] as string[] | undefined,
+        args["limit"] as number | undefined
+      );
+      return JSON.stringify(result);
+    }
 
     default:
       throw new Error(`Tool "${toolName}" has no cached equivalent`);

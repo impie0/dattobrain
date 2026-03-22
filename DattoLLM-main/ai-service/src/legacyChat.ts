@@ -6,7 +6,7 @@ import { toolRegistry } from "./toolRegistry.js";
 import { loadHistory, saveMessages } from "./history.js";
 import { callTool } from "./mcpBridge.js";
 import { buildSystemPrompt, buildSynthesizerPrompt } from "./prompt.js";
-import { executeCachedTool, isLiveOnlyTool } from "./cachedQueries.js";
+import { executeCachedTool, isLiveOnlyTool, isLocalOnlyTool } from "./cachedQueries.js";
 import { checkAndAuditToolPermission, toolDeniedMessage } from "./permissions.js";
 import { tryPreQuery } from "./preQuery.js";
 import {
@@ -281,7 +281,7 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
         // SEC-Cache-001: Hard permission gate — reject tool names not in allowedTools
         const permitted = await checkAndAuditToolPermission(
           toolName, allowedTools, userId, requestId, pool,
-          dataMode === "cached" && !isLiveOnlyTool(toolName) ? "cached" : "live_preflight"
+          (dataMode === "cached" || isLocalOnlyTool(toolName)) && !isLiveOnlyTool(toolName) ? "cached" : "live_preflight"
         );
         if (!permitted) {
           const denySpan = await trace.startSpan("ai-service", "tool_denied", {
@@ -311,21 +311,29 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
           continue;
         }
 
-        const isCached = dataMode === "cached" && !isLiveOnlyTool(toolName);
-        const toolSpan = await trace.startSpan("ai-service", `tool_call [${toolName}] ${isCached ? "CACHED" : "LIVE→MCP"}`, {
+        const isLocal  = isLocalOnlyTool(toolName);
+        const isCached = isLocal || (dataMode === "cached" && !isLiveOnlyTool(toolName));
+        const spanLabel = isLocal ? "LOCAL→VECTOR" : (isCached ? "CACHED" : "LIVE→MCP");
+        const spanSource = isLocal ? "pgvector+ollama" : (isCached ? "postgres_cache" : "mcp_bridge→mcp_server→datto_api");
+        const toolSpan = await trace.startSpan("ai-service", `tool_call [${toolName}] ${spanLabel}`, {
           parentSpanId: rootSpan.spanId,
-          requestPayload: { toolName, toolInput, dataMode, source: isCached ? "postgres_cache" : "mcp_bridge→mcp_server→datto_api" },
+          requestPayload: { toolName, toolInput, dataMode, source: spanSource },
         });
 
         let resultText: string;
         if (isCached) {
           try {
-            const cacheSpan = await trace.startSpan("ai-service", "db_cached_query", { parentSpanId: toolSpan.spanId, requestPayload: { toolName, toolInput } });
+            const cacheSpan = await trace.startSpan("ai-service", isLocal ? "vector_search" : "db_cached_query", { parentSpanId: toolSpan.spanId, requestPayload: { toolName, toolInput } });
             resultText = await executeCachedTool(toolName, toolInput, pool, allowedTools);
-            await cacheSpan.end("ok", { metadata: { toolName, source: "datto_cache" }, responsePayload: { resultLength: resultText.length, resultPreview: resultText.slice(0, 300) } });
+            await cacheSpan.end("ok", { metadata: { toolName, source: isLocal ? "pgvector" : "datto_cache" }, responsePayload: { resultLength: resultText.length, resultPreview: resultText.slice(0, 300) } });
           } catch {
-            const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken, trace.traceId, toolSpan.spanId);
-            resultText = typeof liveResult.result === "string" ? liveResult.result : JSON.stringify(liveResult.result);
+            if (isLocal) {
+              // Local tools have no MCP fallback — surface the error to the LLM
+              resultText = JSON.stringify({ error: `Semantic search unavailable. Ensure Ollama is running and embeddings have been generated (trigger a data sync).` });
+            } else {
+              const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken, trace.traceId, toolSpan.spanId);
+              resultText = typeof liveResult.result === "string" ? liveResult.result : JSON.stringify(liveResult.result);
+            }
           }
         } else {
           const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken, trace.traceId, toolSpan.spanId);

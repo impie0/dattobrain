@@ -7,6 +7,7 @@
  */
 
 import type { Pool } from "pg";
+import { runEmbeddings } from "./embeddings.js";
 
 const MCP_BRIDGE_URL = process.env["MCP_BRIDGE_URL"]!;
 const MCP_INTERNAL_SECRET = process.env["MCP_INTERNAL_SECRET"] ?? "";
@@ -779,6 +780,14 @@ export async function runSync(db: Pool, triggeredBy = "schedule"): Promise<void>
 
     // Stage 3: Refresh materialized views after sync (best effort)
     await refreshMaterializedViews(db);
+
+    // Stage 7: Rebuild semantic embeddings after sync (best effort — never fails the sync)
+    runEmbeddings(db).catch((err) => {
+      process.stdout.write(JSON.stringify({
+        level: "warn", msg: "embedding_pipeline_failed",
+        error: err instanceof Error ? err.message : String(err), ts: Date.now(),
+      }) + "\n");
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     await db.query(

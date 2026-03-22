@@ -15,6 +15,7 @@ export { activityTools } from "./activity.js";
 export { filterTools } from "./filters.js";
 export { systemTools } from "./system.js";
 export { fleetTools } from "./fleet.js";
+export { searchTools } from "./search.js";
 
 import { accountTools } from "./account.js";
 import { siteTools } from "./sites.js";
@@ -26,10 +27,12 @@ import { activityTools } from "./activity.js";
 import { filterTools } from "./filters.js";
 import { systemTools } from "./system.js";
 import { fleetTools } from "./fleet.js";
+import { searchTools } from "./search.js";
 
 /** Full flat registry — same array shape as the old toolRegistry.ts export. */
 export const toolRegistry = [
-  ...fleetTools,   // Stage 3: MV-backed tools first — LLM sees these before heavy tools
+  ...searchTools,  // Stage 7: Semantic vector search — highest priority, most powerful
+  ...fleetTools,   // Stage 3: MV-backed tools — fast fleet overview
   ...accountTools,
   ...siteTools,
   ...deviceTools,

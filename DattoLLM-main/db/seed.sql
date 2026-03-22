@@ -57,7 +57,22 @@ FROM roles r, (VALUES
 WHERE r.name = 'readonly'
 ON CONFLICT (role_id, tool_name) DO NOTHING;
 
--- Tool permissions — admin (all 37 tools)
+-- Tool permissions — semantic-search (all roles — local vector search, no MCP required)
+INSERT INTO tool_permissions (role_id, tool_name)
+SELECT id, 'semantic-search' FROM roles
+ON CONFLICT (role_id, tool_name) DO NOTHING;
+
+-- Tool permissions — Stage 3 MV tools (all roles — read-only fleet overview)
+INSERT INTO tool_permissions (role_id, tool_name)
+SELECT r.id, t.tool_name
+FROM roles r, (VALUES
+  ('get-fleet-status'),
+  ('list-site-summaries'),
+  ('list-critical-alerts')
+) AS t(tool_name)
+ON CONFLICT (role_id, tool_name) DO NOTHING;
+
+-- Tool permissions — admin (all tools)
 INSERT INTO tool_permissions (role_id, tool_name)
 SELECT r.id, t.tool_name
 FROM roles r, (VALUES
@@ -97,7 +112,11 @@ FROM roles r, (VALUES
   ('list-custom-filters'),
   ('get-system-status'),
   ('get-rate-limit'),
-  ('get-pagination-config')
+  ('get-pagination-config'),
+  ('semantic-search'),
+  ('get-fleet-status'),
+  ('list-site-summaries'),
+  ('list-critical-alerts')
 ) AS t(tool_name)
 WHERE r.name = 'admin'
 ON CONFLICT (role_id, tool_name) DO NOTHING;

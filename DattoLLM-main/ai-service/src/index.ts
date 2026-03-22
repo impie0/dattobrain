@@ -20,6 +20,7 @@ import {
 } from "./actionProposals.js";
 import { pool } from "./db.js";
 import { runSync, runAlertSync, getSyncStatus, startScheduledSync, pauseSync, resumeSync, isSyncPaused } from "./sync.js";
+import { runEmbeddings } from "./embeddings.js";
 import {
   handleBrowserOverview, handleBrowserSites, handleBrowserSite,
   handleBrowserDevices, handleBrowserDevice, handleBrowserDeviceSoftware,
@@ -317,6 +318,29 @@ app.post("/api/admin/sync/resume", (req, res) => {
   if (userRole !== "admin") { res.status(403).json({ error: "admin only" }); return; }
   resumeSync();
   res.json({ paused: false });
+});
+
+// ── Admin — embedding pipeline (Stage 7) ──────────────────────────────────
+app.post("/api/admin/embeddings/run", (req, res) => {
+  const userRole = req.headers["x-user-role"] as string | undefined;
+  if (userRole !== "admin") { res.status(403).json({ error: "admin only" }); return; }
+  res.json({ started: true, message: "Embedding pipeline started in background. Check /api/admin/embeddings/stats for progress." });
+  setImmediate(() => { runEmbeddings(pool).catch(() => {}); });
+});
+
+app.get("/api/admin/embeddings/stats", async (req, res) => {
+  const userRole = req.headers["x-user-role"] as string | undefined;
+  if (userRole !== "admin") { res.status(403).json({ error: "admin only" }); return; }
+  try {
+    const stats = await pool.query<{ entity_type: string; embedded_count: string; last_embedded_at: Date; first_embedded_at: Date }>(
+      `SELECT entity_type, COUNT(*)::int AS embedded_count, MAX(embedded_at) AS last_embedded_at, MIN(embedded_at) AS first_embedded_at
+       FROM semantic_embeddings GROUP BY entity_type ORDER BY entity_type`
+    );
+    const total = stats.rows.reduce((s, r) => s + Number(r.embedded_count), 0);
+    res.json({ total, byType: stats.rows });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 // ── Admin — data browser ───────────────────────────────────────────────────
