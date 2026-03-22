@@ -105,6 +105,7 @@ export default function ExplorerPage() {
             <NavCard href="/admin/explorer/sites" label="Sites" desc="Browse all sites, view devices and alerts per site" count={c.sites} />
             <NavCard href="/admin/explorer/devices" label="Devices" desc="Search and filter all devices, view hardware audits and software" count={c.devices} />
             <NavCard href="/admin/explorer/alerts" label="Alerts" desc="Browse open and resolved alerts, filter by site or priority" count={c.open_alerts} />
+            <NavCard href="/admin/explorer/vulnerabilities" label="Vulnerabilities" desc="CVE scanner — software matched against NVD database, color-coded by severity" count={0} />
           </div>
 
           {/* Top sites */}

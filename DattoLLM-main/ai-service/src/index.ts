@@ -32,6 +32,10 @@ import {
 import {
   handleListTraces, handleGetTrace, handleIngestSpans,
 } from "./traceHandlers.js";
+import {
+  handleVulnSummary, handleVulnList, handleDeviceVulns,
+  handleVulnSoftwareList, handleCveScanTrigger, handleCveScanStatus,
+} from "./vulnBrowser.js";
 
 function log(level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) {
   const line = JSON.stringify({ level, msg, ts: Date.now(), ...extra });
@@ -96,14 +100,14 @@ app.get("/api/debug/traces", async (req, res) => {
   if (!userId) { res.status(401).json({ error: "missing x-user-id" }); return; }
   try {
     const result = await pool.query(
-      `SELECT s.id, s.created_at AS timestamp, s.user_id, s.allowed_tools,
+      `SELECT s.id, s.created_at AS timestamp, s.user_id,
               m_user.content AS question,
               m_asst.content AS answer,
               m_asst.tools_used
        FROM chat_sessions s
-       JOIN LATERAL (SELECT content FROM chat_messages WHERE session_id = s.id AND role = 'user'      ORDER BY created_at ASC  LIMIT 1) m_user ON true
-       JOIN LATERAL (SELECT content, tools_used FROM chat_messages WHERE session_id = s.id AND role = 'assistant' ORDER BY created_at DESC LIMIT 1) m_asst ON true
-       WHERE s.user_id = $1
+       LEFT JOIN LATERAL (SELECT content FROM chat_messages WHERE session_id = s.id AND role = 'user'      ORDER BY created_at ASC  LIMIT 1) m_user ON true
+       LEFT JOIN LATERAL (SELECT content, tools_used FROM chat_messages WHERE session_id = s.id AND role = 'assistant' ORDER BY created_at DESC LIMIT 1) m_asst ON true
+       WHERE s.user_id = $1 AND m_user.content IS NOT NULL
        ORDER BY s.created_at DESC
        LIMIT 20`,
       [userId]
@@ -113,15 +117,15 @@ app.get("/api/debug/traces", async (req, res) => {
       timestamp: r["timestamp"],
       userId: r["user_id"],
       role: "user",
-      question: r["question"],
-      allowedTools: (r["allowed_tools"] as string[]) ?? [],
+      question: r["question"] ?? "",
+      allowedTools: [] as string[],
       toolCalls: ((r["tools_used"] as string[]) ?? []).map((name: string) => ({
         name,
         args: {},
         resultPreview: "",
         durationMs: 0,
       })),
-      answer: r["answer"],
+      answer: r["answer"] ?? "",
       mockMode: false,
     }));
     res.json(traces);
@@ -302,6 +306,14 @@ app.get("/api/admin/browser/devices",          adminOnly, (req, res) => handleBr
 app.get("/api/admin/browser/devices/:uid",     adminOnly, (req, res) => handleBrowserDevice(req, res, pool));
 app.get("/api/admin/browser/devices/:uid/software", adminOnly, (req, res) => handleBrowserDeviceSoftware(req, res, pool));
 app.get("/api/admin/browser/alerts",           adminOnly, (req, res) => handleBrowserAlerts(req, res, pool));
+
+// ── Admin — vulnerability browser ─────────────────────────────────────────
+app.get("/api/admin/browser/vulnerabilities/summary",      adminOnly, (req, res) => handleVulnSummary(req, res, pool));
+app.get("/api/admin/browser/vulnerabilities/software",     adminOnly, (req, res) => handleVulnSoftwareList(req, res, pool));
+app.get("/api/admin/browser/vulnerabilities",              adminOnly, (req, res) => handleVulnList(req, res, pool));
+app.get("/api/admin/browser/devices/:uid/vulnerabilities", adminOnly, (req, res) => handleDeviceVulns(req, res, pool));
+app.post("/api/admin/cve-scan",                            adminOnly, (req, res) => handleCveScanTrigger(req, res, pool));
+app.get("/api/admin/cve-scan/status",                      adminOnly, (req, res) => handleCveScanStatus(req, res, pool));
 
 // ── Admin — observability ──────────────────────────────────────────────────
 app.get("/api/admin/observability/overview", adminOnly, (req, res) => handleObsOverview(req, res, pool));

@@ -44,7 +44,7 @@ export default function DeviceDetailPage() {
   const [error, setError] = useState("");
 
   // Software tab
-  const [software, setSoftware] = useState<{ name: string; version: string | null; publisher: string | null; install_date: string | null }[]>([]);
+  const [software, setSoftware] = useState<{ name: string; version: string | null; publisher: string | null; install_date: string | null; cve_count?: number; max_severity?: string | null }[]>([]);
   const [softwareTotal, setSoftwareTotal] = useState(0);
   const [softwarePage, setSoftwarePage] = useState(1);
   const [softwareSearch, setSoftwareSearch] = useState("");
@@ -261,21 +261,40 @@ export default function DeviceDetailPage() {
               <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: "8px", overflow: "hidden" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
-                    <tr>{["Name", "Version", "Publisher", "Install Date"].map(h => <th key={h} style={HEAD}>{h}</th>)}</tr>
+                    <tr>{["Name", "Version", "CVEs", "Severity", "Publisher"].map(h => <th key={h} style={HEAD}>{h}</th>)}</tr>
                   </thead>
                   <tbody>
                     {softwareLoading ? (
-                      <tr><td colSpan={4} style={{ ...CELL, textAlign: "center", color: "#64748b" }}>Loading…</td></tr>
+                      <tr><td colSpan={5} style={{ ...CELL, textAlign: "center", color: "#64748b" }}>Loading…</td></tr>
                     ) : software.length === 0 ? (
-                      <tr><td colSpan={4} style={{ ...CELL, textAlign: "center", color: "#64748b" }}>No software records</td></tr>
-                    ) : software.map((s, i) => (
-                      <tr key={i}>
-                        <td style={{ ...CELL, fontWeight: 500 }}>{s.name}</td>
-                        <td style={{ ...CELL, color: "#94a3b8", fontFamily: "monospace", fontSize: "0.8125rem" }}>{s.version ?? "—"}</td>
-                        <td style={{ ...CELL, color: "#94a3b8" }}>{s.publisher ?? "—"}</td>
-                        <td style={{ ...CELL, color: "#64748b", fontSize: "0.8125rem" }}>{s.install_date ?? "—"}</td>
-                      </tr>
-                    ))}
+                      <tr><td colSpan={5} style={{ ...CELL, textAlign: "center", color: "#64748b" }}>No software records</td></tr>
+                    ) : software.map((s, i) => {
+                      const cveCount = s.cve_count ?? 0;
+                      const sev = (s.max_severity ?? "").toUpperCase();
+                      const sevColor = sev === "CRITICAL" ? "#dc2626" : sev === "HIGH" ? "#f97316" : sev === "MEDIUM" ? "#eab308" : cveCount > 0 ? "#3b82f6" : "#334155";
+                      const sevLabel = sev === "CRITICAL" ? "Critical" : sev === "HIGH" ? "High" : sev === "MEDIUM" ? "Medium" : sev === "LOW" ? "Low" : "";
+                      return (
+                        <tr key={i} style={{ background: cveCount > 0 && sev === "CRITICAL" ? "#1a0505" : cveCount > 0 && sev === "HIGH" ? "#1a0f05" : "" }}>
+                          <td style={{ ...CELL, fontWeight: 500 }}>
+                            {cveCount > 0 ? (
+                              <Link href={`/admin/explorer/vulnerabilities?software=${encodeURIComponent(s.name)}`} style={{ color: "#60a5fa", textDecoration: "none" }}>{s.name}</Link>
+                            ) : s.name}
+                          </td>
+                          <td style={{ ...CELL, color: "#94a3b8", fontFamily: "monospace", fontSize: "0.8125rem" }}>{s.version ?? "—"}</td>
+                          <td style={{ ...CELL, textAlign: "center" }}>
+                            {cveCount > 0 ? (
+                              <Link href={`/admin/explorer/vulnerabilities?software=${encodeURIComponent(s.name)}`} style={{ textDecoration: "none" }}>
+                                <span style={{ fontSize: "0.7rem", fontWeight: 700, padding: "2px 8px", borderRadius: 4, background: sevColor, color: "#fff" }}>{cveCount}</span>
+                              </Link>
+                            ) : <span style={{ color: "#334155" }}>—</span>}
+                          </td>
+                          <td style={CELL}>
+                            {sevLabel ? <span style={{ fontSize: "0.65rem", fontWeight: 700, padding: "1px 6px", borderRadius: 3, background: sevColor, color: "#fff" }}>{sevLabel}</span> : <span style={{ color: "#334155" }}>—</span>}
+                          </td>
+                          <td style={{ ...CELL, color: "#94a3b8" }}>{s.publisher ?? "—"}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

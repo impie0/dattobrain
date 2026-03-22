@@ -56,7 +56,7 @@ export default function TracePage() {
             }}
           >
             <div style={{ marginBottom: "0.75rem", color: "#94a3b8" }}>
-              {t.timestamp} · role={t.role} · userId={t.userId.slice(0, 8)}… {t.mockMode && <span style={{ color: "#fbbf24" }}>· MOCK</span>}
+              {t.timestamp} · role={t.role} · userId={(t.userId ?? "unknown").slice(0, 8)}… {t.mockMode && <span style={{ color: "#fbbf24" }}>· MOCK</span>}
             </div>
             <div style={{ marginBottom: "0.5rem" }}><strong>Question:</strong> {t.question}</div>
             <div style={{ marginBottom: "0.5rem" }}><strong>Allowed tools:</strong> {t.allowedTools.length ? t.allowedTools.join(", ") : "(none)"}</div>

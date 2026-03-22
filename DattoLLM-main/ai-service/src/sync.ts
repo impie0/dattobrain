@@ -216,16 +216,18 @@ async function syncDevices(db: Pool): Promise<number> {
          uid, id, hostname, int_ip_address, ext_ip_address, site_uid, site_name,
          device_class, device_type, operating_system, display_version, online,
          reboot_required, last_seen, warranty_date, av_product, av_status, patch_status,
+         domain, last_logged_in_user, last_reboot, last_audit_date, description, suspended, category,
          udf1,udf2,udf3,udf4,udf5,udf6,udf7,udf8,udf9,udf10,
          udf11,udf12,udf13,udf14,udf15,udf16,udf17,udf18,udf19,udf20,
          udf21,udf22,udf23,udf24,udf25,udf26,udf27,udf28,udf29,udf30,
          data, synced_at
        ) VALUES (
          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-         $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,
-         $29,$30,$31,$32,$33,$34,$35,$36,$37,$38,
-         $39,$40,$41,$42,$43,$44,$45,$46,$47,$48,
-         $49, NOW()
+         $19,$20,$21,$22,$23,$24,$25,
+         $26,$27,$28,$29,$30,$31,$32,$33,$34,$35,
+         $36,$37,$38,$39,$40,$41,$42,$43,$44,$45,
+         $46,$47,$48,$49,$50,$51,$52,$53,$54,$55,
+         $56, NOW()
        )
        ON CONFLICT (uid) DO UPDATE SET
          hostname = EXCLUDED.hostname, int_ip_address = EXCLUDED.int_ip_address,
@@ -236,6 +238,10 @@ async function syncDevices(db: Pool): Promise<number> {
          reboot_required = EXCLUDED.reboot_required, last_seen = EXCLUDED.last_seen,
          warranty_date = EXCLUDED.warranty_date, av_product = EXCLUDED.av_product,
          av_status = EXCLUDED.av_status, patch_status = EXCLUDED.patch_status,
+         domain = EXCLUDED.domain, last_logged_in_user = EXCLUDED.last_logged_in_user,
+         last_reboot = EXCLUDED.last_reboot, last_audit_date = EXCLUDED.last_audit_date,
+         description = EXCLUDED.description, suspended = EXCLUDED.suspended,
+         category = EXCLUDED.category,
          data = EXCLUDED.data, synced_at = NOW()`,
       [
         d["uid"], d["id"], d["hostname"], d["intIpAddress"] ?? null, d["extIpAddress"] ?? null,
@@ -248,6 +254,13 @@ async function syncDevices(db: Pool): Promise<number> {
         (d["antivirus"] as Record<string, unknown>)?.["antivirusProduct"] ?? null,
         (d["antivirus"] as Record<string, unknown>)?.["antivirusStatus"] ?? null,
         (d["patchManagement"] as Record<string, unknown>)?.["patchStatus"] ?? null,
+        d["domain"] ?? null,
+        d["lastLoggedInUser"] ?? null,
+        d["lastReboot"] ? new Date(d["lastReboot"] as number) : null,
+        d["lastAuditDate"] ? new Date(d["lastAuditDate"] as number) : null,
+        d["description"] ?? null,
+        d["suspended"] ?? false,
+        (d["deviceType"] as Record<string, unknown>)?.["category"] ?? null,
         ...Array.from({ length: 30 }, (_, i) => udf[`udf${i + 1}`] ?? null),
         JSON.stringify(d),
       ]
@@ -262,20 +275,32 @@ async function syncAlerts(db: Pool): Promise<{ open: number; resolved: number }>
   const openAlerts = await fetchAllPages<Record<string, unknown>>("list-open-alerts", "alerts");
 
   for (const a of openAlerts) {
+    // Datto nests device/site info under alertSourceInfo, message under alertMonitorInfo
+    const src = (a["alertSourceInfo"] as Record<string, unknown>) ?? {};
+    const mon = (a["alertMonitorInfo"] as Record<string, unknown>) ?? {};
+    const ts = a["timestamp"] as number | null;
     await db.query(
       `INSERT INTO datto_cache_alerts (alert_uid, device_uid, device_name, site_uid, site_name,
          alert_message, priority, resolved, muted, alert_timestamp, resolved_at, autotask_ticket, data, synced_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,false,$8,$9,null,$10,$11,NOW())
        ON CONFLICT (alert_uid) DO UPDATE SET
+         device_uid = COALESCE(EXCLUDED.device_uid, datto_cache_alerts.device_uid),
+         device_name = COALESCE(EXCLUDED.device_name, datto_cache_alerts.device_name),
+         site_uid = COALESCE(EXCLUDED.site_uid, datto_cache_alerts.site_uid),
+         site_name = COALESCE(EXCLUDED.site_name, datto_cache_alerts.site_name),
          alert_message = EXCLUDED.alert_message, priority = EXCLUDED.priority,
          resolved = false, muted = EXCLUDED.muted, alert_timestamp = EXCLUDED.alert_timestamp,
          autotask_ticket = EXCLUDED.autotask_ticket, data = EXCLUDED.data, synced_at = NOW()`,
       [
-        a["alertUid"], a["deviceUid"] ?? null, a["deviceName"] ?? null,
-        a["siteUid"] ?? null, a["siteName"] ?? null, a["alertMessage"] ?? "",
+        a["alertUid"],
+        (src["deviceUid"] as string) ?? null,
+        (src["deviceName"] as string) ?? null,
+        (src["siteUid"] as string) ?? null,
+        (src["siteName"] as string) ?? null,
+        (mon["alertMessage"] as string) ?? (a["diagnostics"] as string) ?? "",
         a["priority"] ?? null, a["muted"] ?? false,
-        a["alertTimestamp"] ? new Date(a["alertTimestamp"] as string) : null,
-        a["autotaskTicketNumber"] ?? null, JSON.stringify(a),
+        ts ? new Date(ts) : null,
+        a["ticketNumber"] ?? null, JSON.stringify(a),
       ]
     );
   }
@@ -284,22 +309,34 @@ async function syncAlerts(db: Pool): Promise<{ open: number; resolved: number }>
   const resolvedAlerts = await fetchAllPages<Record<string, unknown>>("list-resolved-alerts", "alerts");
 
   for (const a of resolvedAlerts) {
+    const src = (a["alertSourceInfo"] as Record<string, unknown>) ?? {};
+    const mon = (a["alertMonitorInfo"] as Record<string, unknown>) ?? {};
+    const ts = a["timestamp"] as number | null;
+    const resolvedOn = a["resolvedOn"] as number | null;
     await db.query(
       `INSERT INTO datto_cache_alerts (alert_uid, device_uid, device_name, site_uid, site_name,
          alert_message, priority, resolved, muted, alert_timestamp, resolved_at, autotask_ticket, data, synced_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,true,$8,$9,$10,$11,$12,NOW())
        ON CONFLICT (alert_uid) DO UPDATE SET
+         device_uid = COALESCE(EXCLUDED.device_uid, datto_cache_alerts.device_uid),
+         device_name = COALESCE(EXCLUDED.device_name, datto_cache_alerts.device_name),
+         site_uid = COALESCE(EXCLUDED.site_uid, datto_cache_alerts.site_uid),
+         site_name = COALESCE(EXCLUDED.site_name, datto_cache_alerts.site_name),
          alert_message = EXCLUDED.alert_message, priority = EXCLUDED.priority,
          resolved = true, muted = EXCLUDED.muted, alert_timestamp = EXCLUDED.alert_timestamp,
          resolved_at = EXCLUDED.resolved_at, autotask_ticket = EXCLUDED.autotask_ticket,
          data = EXCLUDED.data, synced_at = NOW()`,
       [
-        a["alertUid"], a["deviceUid"] ?? null, a["deviceName"] ?? null,
-        a["siteUid"] ?? null, a["siteName"] ?? null, a["alertMessage"] ?? "",
+        a["alertUid"],
+        (src["deviceUid"] as string) ?? null,
+        (src["deviceName"] as string) ?? null,
+        (src["siteUid"] as string) ?? null,
+        (src["siteName"] as string) ?? null,
+        (mon["alertMessage"] as string) ?? (a["diagnostics"] as string) ?? "",
         a["priority"] ?? null, a["muted"] ?? false,
-        a["alertTimestamp"] ? new Date(a["alertTimestamp"] as string) : null,
-        a["resolvedOn"] ? new Date(a["resolvedOn"] as string) : null,
-        a["autotaskTicketNumber"] ?? null, JSON.stringify(a),
+        ts ? new Date(ts) : null,
+        resolvedOn ? new Date(resolvedOn) : null,
+        a["ticketNumber"] ?? null, JSON.stringify(a),
       ]
     );
   }
@@ -409,14 +446,29 @@ async function syncDeviceAudits(db: Pool): Promise<{ audits: number; software: n
       // Hardware audit
       try {
         const audit = (await callMcpTool("get-device-audit", { deviceUid: uid })) as Record<string, unknown>;
-        const cpu = (audit["cpu"] as Record<string, unknown>) ?? {};
-        const ram = audit["ram"] as number | null;
-        const bios = (audit["bios"] as Record<string, unknown>) ?? {};
+        // Datto audit structure: processors[], systemInfo{}, baseBoard{}, bios{}, logicalDisks[], nics[]
+        const processors = (audit["processors"] as { name?: string }[]) ?? [];
+        const sysInfo = (audit["systemInfo"] as Record<string, unknown>) ?? {};
+        const ramBytes = (sysInfo["totalPhysicalMemory"] as number) ?? 0;
+        const ram = ramBytes > 0 ? Math.round(ramBytes / 1048576) : null; // bytes → MB
+        const cpu = {
+          description: processors[0]?.name ?? null,
+          cores: (sysInfo["totalCpuCores"] as number) ?? null,
+          processors: processors.length || null,
+          speedMhz: null, // not provided by Datto API
+        };
+        const baseBoard = (audit["baseBoard"] as Record<string, unknown>) ?? {};
+        const biosData = (audit["bios"] as Record<string, unknown>) ?? {};
+        const bios = {
+          manufacturer: (baseBoard["manufacturer"] as string) ?? null,
+          version: (biosData["smBiosVersion"] as string) ?? (biosData["instance"] as string) ?? null,
+          releaseDate: biosData["releaseDate"] ? new Date(biosData["releaseDate"] as number).toISOString().split("T")[0] : null,
+        };
         const os = (audit["operatingSystem"] as Record<string, unknown>) ?? {};
-        const drives = (audit["drives"] as unknown[]) ?? [];
-        const nics = (audit["networkCards"] as unknown[]) ?? [];
-        const totalGB = drives.reduce((s: number, d: unknown) => s + (((d as Record<string, unknown>)["capacityBytes"] as number) ?? 0) / 1073741824, 0);
-        const freeGB = drives.reduce((s: number, d: unknown) => s + (((d as Record<string, unknown>)["freeSpaceBytes"] as number) ?? 0) / 1073741824, 0);
+        const drives = (audit["logicalDisks"] as unknown[]) ?? [];
+        const nics = (audit["nics"] as unknown[]) ?? [];
+        const totalGB = drives.reduce((s: number, d: unknown) => s + (((d as Record<string, unknown>)["size"] as number) ?? 0) / 1073741824, 0);
+        const freeGB = drives.reduce((s: number, d: unknown) => s + (((d as Record<string, unknown>)["freespace"] as number) ?? 0) / 1073741824, 0);
         await db.query(
           `INSERT INTO datto_cache_device_audit (device_uid, cpu_description, cpu_cores, cpu_processors, cpu_speed_mhz,
              ram_total_mb, bios_manufacturer, bios_version, bios_release_date, os_name, os_build, os_install_date,
@@ -440,6 +492,60 @@ async function syncDeviceAudits(db: Pool): Promise<{ audits: number; software: n
           ]
         );
         audits++;
+
+        // Extract extended audit data into dedicated tables
+        try {
+          // Physical Memory / DIMMs
+          const physMem = (audit["physicalMemory"] as { bank?: string; size?: number; type?: string; speed?: string; partNumber?: string; serialNumber?: string; module?: string }[]) ?? [];
+          if (physMem.length > 0) {
+            await db.query(`DELETE FROM datto_cache_device_memory WHERE device_uid = $1`, [uid]);
+            for (const m of physMem) {
+              if (!m.size) continue;
+              await db.query(
+                `INSERT INTO datto_cache_device_memory (device_uid, slot, capacity_bytes, memory_type, speed, part_number, serial_number, bank)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+                [uid, m.module ?? m.bank ?? null, m.size ?? null, m.type ?? null, m.speed ?? null, (m.partNumber ?? "").trim() || null, (m.serialNumber ?? "").trim() || null, m.bank ?? null]
+              );
+            }
+          }
+
+          // GPU / Video
+          const gpus = (audit["videoBoards"] as { displayAdapter?: string }[]) ?? [];
+          if (gpus.length > 0) {
+            await db.query(`DELETE FROM datto_cache_device_gpu WHERE device_uid = $1`, [uid]);
+            for (const g of gpus) {
+              if (!g.displayAdapter) continue;
+              await db.query(
+                `INSERT INTO datto_cache_device_gpu (device_uid, display_adapter) VALUES ($1,$2)`,
+                [uid, g.displayAdapter]
+              );
+            }
+          }
+
+          // Displays / Monitors
+          const displays = (audit["displays"] as { name?: string; manufacturer?: string; serialNumber?: string }[]) ?? [];
+          if (displays.length > 0) {
+            await db.query(`DELETE FROM datto_cache_device_displays WHERE device_uid = $1`, [uid]);
+            for (const d of displays) {
+              await db.query(
+                `INSERT INTO datto_cache_device_displays (device_uid, name, manufacturer, serial_number) VALUES ($1,$2,$3,$4)`,
+                [uid, d.name ?? null, d.manufacturer ?? null, d.serialNumber ?? null]
+              );
+            }
+          }
+
+          // Network Interfaces (detailed)
+          if (nics.length > 0) {
+            await db.query(`DELETE FROM datto_cache_device_nics WHERE device_uid = $1`, [uid]);
+            for (const n of nics as { instance?: string; type?: string; ipv4?: string; ipv6?: string; macAddress?: string }[]) {
+              await db.query(
+                `INSERT INTO datto_cache_device_nics (device_uid, name, type, ipv4, ipv6, mac_address) VALUES ($1,$2,$3,$4,$5,$6)`,
+                [uid, n.instance ?? null, n.type ?? null, n.ipv4 ?? null, n.ipv6 ?? null, n.macAddress ?? null]
+              );
+            }
+          }
+        } catch { /* extended audit extraction is best-effort */ }
+
       } catch (err) {
         errors++;
         lastError = err instanceof Error ? err.message : String(err);
@@ -554,6 +660,45 @@ export async function runAlertSync(db: Pool, triggeredBy = "schedule"): Promise<
   }
 }
 
+// ── Activity Log Sync ─────────────────────────────────────────────────────
+
+async function syncActivityLogs(db: Pool): Promise<number> {
+  try {
+    const data = (await callMcpTool("get-activity-logs", { max: 250 })) as Record<string, unknown>;
+    const activities = (data["activities"] as Record<string, unknown>[]) ?? [];
+
+    for (const a of activities) {
+      const site = (a["site"] as Record<string, unknown>) ?? {};
+      let details: unknown = null;
+      try { details = typeof a["details"] === "string" ? JSON.parse(a["details"] as string) : a["details"]; } catch { details = a["details"]; }
+
+      await db.query(
+        `INSERT INTO datto_cache_activity_logs (id, entity, category, action, activity_date, site_id, site_name, device_id, hostname, username, details, has_stdout, has_stderr, synced_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
+         ON CONFLICT (id) DO NOTHING`,
+        [
+          a["id"] ?? `gen-${Date.now()}-${Math.random()}`,
+          a["entity"] ?? null,
+          a["category"] ?? null,
+          a["action"] ?? null,
+          a["date"] ? new Date((a["date"] as number) * 1000) : null,
+          (site["id"] as number) ?? null,
+          (site["name"] as string) ?? null,
+          (a["deviceId"] as number) ?? null,
+          (a["hostname"] as string) ?? null,
+          (a["user"] as string) ?? null,
+          details ? JSON.stringify(details) : null,
+          a["hasStdOut"] ?? false,
+          a["hasStdErr"] ?? false,
+        ]
+      );
+    }
+    return activities.length;
+  } catch {
+    return 0;
+  }
+}
+
 export async function runSync(db: Pool, triggeredBy = "schedule"): Promise<void> {
   // SEC-011: Acquire advisory lock — skip if a full sync is already running
   const lockClient = await db.connect();
@@ -592,6 +737,9 @@ export async function runSync(db: Pool, triggeredBy = "schedule"): Promise<void>
 
     // Stage 5 — device audits (depends on devices)
     const { audits, software, esxi, printers, errors: auditErrors, lastError: auditLastError } = await syncDeviceAudits(db);
+
+    // Sync activity logs (best effort, won't fail the sync)
+    const activityCount = await syncActivityLogs(db);
 
     await db.query(
       `UPDATE datto_sync_log SET
@@ -674,7 +822,7 @@ export async function getSyncStatus(db: Pool): Promise<{
       SELECT
         (SELECT COUNT(*) FROM datto_cache_sites)::int AS sites,
         (SELECT COUNT(*) FROM datto_cache_devices)::int AS devices,
-        (SELECT COUNT(*) FROM datto_cache_devices WHERE device_class = 'device')::int AS devices_audited,
+        (SELECT COUNT(*) FROM datto_cache_device_audit)::int AS devices_audited,
         (SELECT COUNT(*) FROM datto_cache_device_software)::int AS software_entries,
         (SELECT COUNT(*) FROM datto_cache_devices WHERE device_class = 'esxihost')::int AS esxi_hosts,
         (SELECT COUNT(*) FROM datto_cache_devices WHERE device_class = 'printer')::int AS printers,

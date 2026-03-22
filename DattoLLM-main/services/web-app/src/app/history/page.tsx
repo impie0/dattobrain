@@ -99,8 +99,8 @@ export default function HistoryPage() {
                     color: "#e2e8f0",
                   }}
                 >
-                  {item.question.slice(0, 120)}
-                  {item.question.length > 120 ? "…" : ""}
+                  {(item.question ?? "Untitled conversation").slice(0, 120)}
+                  {(item.question ?? "").length > 120 ? "…" : ""}
                 </p>
                 <p
                   style={{

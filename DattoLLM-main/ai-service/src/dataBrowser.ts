@@ -230,7 +230,22 @@ export async function handleBrowserDevice(req: Request, res: Response, db: Pool)
       [uid]
     );
 
-    res.json({ device: device.rows[0], alerts: alerts.rows });
+    const vulns = await db.query(
+      `SELECT
+         COUNT(*)::int AS total,
+         COUNT(*) FILTER (WHERE severity = 'CRITICAL')::int AS critical,
+         COUNT(*) FILTER (WHERE severity = 'HIGH')::int AS high,
+         COUNT(*) FILTER (WHERE severity = 'MEDIUM')::int AS medium,
+         COUNT(*) FILTER (WHERE severity = 'LOW')::int AS low
+       FROM device_vulnerabilities WHERE device_uid = $1`,
+      [uid]
+    );
+
+    res.json({
+      device: device.rows[0],
+      alerts: alerts.rows,
+      vulnerabilities: vulns.rows[0] ?? { total: 0, critical: 0, high: 0, medium: 0, low: 0 },
+    });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -249,10 +264,19 @@ export async function handleBrowserDeviceSoftware(req: Request, res: Response, d
     if (search) params.push(`%${search}%`);
 
     const r = await db.query(
-      `SELECT name, version, publisher, install_date
-       FROM datto_cache_device_software
-       WHERE device_uid = $1 ${where}
-       ORDER BY name
+      `SELECT s.name, s.version, s.publisher, s.install_date,
+              COALESCE(v.cve_count, 0)::int AS cve_count,
+              v.max_severity
+       FROM datto_cache_device_software s
+       LEFT JOIN (
+         SELECT software_name, device_uid,
+                COUNT(DISTINCT cve_id)::int AS cve_count,
+                MAX(severity) AS max_severity
+         FROM device_vulnerabilities
+         GROUP BY software_name, device_uid
+       ) v ON v.software_name = s.name AND v.device_uid = s.device_uid
+       WHERE s.device_uid = $1 ${where}
+       ORDER BY COALESCE(v.cve_count, 0) DESC, s.name
        LIMIT $2 OFFSET $3`,
       params
     );

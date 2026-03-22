@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **dattobrain** (734 symbols, 1468 relationships, 49 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **datto** (858 symbols, 1720 relationships, 57 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -17,7 +17,7 @@ This project is indexed by GitNexus as **dattobrain** (734 symbols, 1468 relatio
 
 1. `gitnexus_query({query: "<error or symptom>"})` — find execution flows related to the issue
 2. `gitnexus_context({name: "<suspect function>"})` — see all callers, callees, and process participation
-3. `READ gitnexus://repo/dattobrain/process/{processName}` — trace the full execution flow step by step
+3. `READ gitnexus://repo/datto/process/{processName}` — trace the full execution flow step by step
 4. For regressions: `gitnexus_detect_changes({scope: "compare", base_ref: "main"})` — see what your branch changed
 
 ## When Refactoring
@@ -56,10 +56,10 @@ This project is indexed by GitNexus as **dattobrain** (734 symbols, 1468 relatio
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/dattobrain/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/dattobrain/clusters` | All functional areas |
-| `gitnexus://repo/dattobrain/processes` | All execution flows |
-| `gitnexus://repo/dattobrain/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/datto/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/datto/clusters` | All functional areas |
+| `gitnexus://repo/datto/processes` | All execution flows |
+| `gitnexus://repo/datto/process/{name}` | Step-by-step execution trace |
 
 ## Self-Check Before Finishing
 
@@ -99,6 +99,61 @@ To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
+
+---
+
+# DattoLLM Platform — Documentation Map
+
+This repo contains the **Datto RMM AI Platform** (`DattoLLM-main/`). Before answering architecture, service, security, deployment, or implementation questions — **read the relevant doc first**. Do not answer from memory or conversation context alone.
+
+## Primary References (read these first)
+
+| File | Contents | When to read |
+|------|----------|-------------|
+| `DattoLLM-main/docs/PLATFORM_BRAIN.md` | **System map, all 10 services, security models, deployment notes, LLM routing, env vars** — the authoritative platform reference (1,600 lines) | Any question about how the platform works, before any code change |
+| `DattoLLM-main/docs/ARCHITECTURE.md` | Full technical spec with expanded diagrams, code snippets, edge cases | Deep implementation details beyond what `PLATFORM_BRAIN.md` covers |
+| `DattoLLM-main/docs/DATABASE.md` | Every table, column, index, FK, and design decision (29 tables) | Any database question, schema change, or migration |
+| `DattoLLM-main/DEPLOY.md` | **Step-by-step fresh deploy guide** — env vars, JWT keys, PgBouncer, APISIX routes, verification | Fresh deploy, new machine, or "nothing works" debugging |
+
+## Topic-Specific References
+
+| File | Contents | When to read |
+|------|----------|-------------|
+| `DattoLLM-main/docs/deep-dives/local-data.md` | Datto cache sync pipeline, rate limiting, error tracking | Cache/sync questions |
+| `DattoLLM-main/docs/deep-dives/local-llm.md` | LiteLLM routing, model configuration | LLM routing questions |
+| `DattoLLM-main/docs/modules/Write Tool State Machine.md` | Action proposal staging, approval flow, DB schema | Write tool / approval questions |
+| `DattoLLM-main/docs/planning/ROADMAP.md` | Implementation phases, architectural decisions | "Why was X built this way?" |
+| `DattoLLM-main/docs/planning/SECURITY_FINDINGS.md` | Security review findings and remediation status | Security questions |
+
+## Obsidian Knowledge Graph — Folder Structure
+
+Vault nodes are organized into folders by type. All use `[[wikilinks]]` for cross-references (Obsidian resolves by filename, not path).
+
+```
+DattoLLM-main/
+├── docs/                        ← ALL documentation lives here (separate from code)
+│   ├── Home.md                  ← vault index
+│   ├── PLATFORM_BRAIN.md        ← main brain (start here)
+│   ├── ARCHITECTURE.md          ← full technical spec
+│   ├── DATABASE.md              ← schema reference (29 tables)
+│   ├── README_PLATFORM.md       ← quick start
+│   ├── services/                ← 8 service nodes
+│   ├── flows/                   ← 3 execution flows
+│   ├── database/                ← 5 table nodes
+│   ├── security/                ← 4 security models
+│   ├── modules/                 ← 7 code modules + features
+│   ├── deep-dives/              ← topic deep-dives
+│   ├── planning/                ← historical planning docs
+│   └── connections/             ← 10 service-to-service interface docs
+├── ai-service/                  ← code
+├── auth-service/                ← code
+├── services/                    ← service configs (apisix, etc.)
+└── ...
+```
+
+## Planning Documents (historical, not current truth)
+
+Files in `planning/` (`*-PLAN.md`, `ROADMAP.md`, `SECURITY_FINDINGS.md`) document **decisions made during design**. They may be stale. Always check `PLATFORM_BRAIN.md` or `ARCHITECTURE.md` for current implementation.
 
 ---
 

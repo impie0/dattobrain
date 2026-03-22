@@ -783,3 +783,65 @@ export async function getLlmModels(): Promise<{ models: LlmModel[] }> {
   return res.json();
 }
 
+// ── Vulnerability Scanner ─────────────────────────────────────────────────
+
+export interface VulnSummary {
+  totals: { total: number; critical: number; high: number; medium: number; low: number };
+  topSoftware: { name: string; cve_count: number; device_count: number; worst_score: number }[];
+  topSites: { site_name: string; device_count: number; critical_count: number; high_count: number }[];
+  lastSync: { status: string; started_at: string; completed_at: string | null; cves_added: number; matches_found: number; error: string | null } | null;
+}
+
+export async function getVulnSummary(): Promise<VulnSummary> {
+  return browserGet("vulnerabilities/summary") as Promise<VulnSummary>;
+}
+
+export interface VulnMatch {
+  hostname: string; site_name: string;
+  software_name: string; software_version: string | null;
+  cve_id: string; cvss_v3_score: number | null; severity: string;
+  match_confidence: number; found_at: string; description: string | null;
+}
+
+export async function getVulnList(params: {
+  page?: number; pageSize?: number; severity?: string;
+  site?: string; device?: string; software?: string; search?: string;
+} = {}): Promise<{ vulnerabilities: VulnMatch[]; total: number; page: number; pageSize: number }> {
+  return browserGet("vulnerabilities", params as Record<string, string | number | undefined>) as Promise<{ vulnerabilities: VulnMatch[]; total: number; page: number; pageSize: number }>;
+}
+
+export async function getDeviceVulns(uid: string): Promise<{
+  vulnerabilities: VulnMatch[];
+  summary: { critical: number; high: number; medium: number; low: number };
+}> {
+  return browserGet(`devices/${encodeURIComponent(uid)}/vulnerabilities`) as Promise<{
+    vulnerabilities: VulnMatch[];
+    summary: { critical: number; high: number; medium: number; low: number };
+  }>;
+}
+
+export async function triggerCveScan(): Promise<{ started: boolean }> {
+  const token = getToken();
+  if (!token) throw new Error("Not authenticated");
+  const res = await fetch(`${API_BASE}/api/admin/cve-scan`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error("Failed to trigger CVE scan");
+  return res.json();
+}
+
+export async function getCveScanStatus(): Promise<{
+  cves: number; cpes: number; matches: number;
+  bySeverity: Record<string, number>;
+  lastSync: { status: string; started_at: string; completed_at: string | null; matches_found: number } | null;
+}> {
+  const token = getToken();
+  if (!token) throw new Error("Not authenticated");
+  const res = await fetch(`${API_BASE}/api/admin/cve-scan/status`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error("Failed to get CVE scan status");
+  return res.json();
+}
+

@@ -99,6 +99,14 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
       },
     });
 
+    // Ensure session exists early — needed for llm_request_logs FK and title
+    await pool.query(
+      `INSERT INTO chat_sessions (id, user_id, title, updated_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (id) DO UPDATE SET updated_at = NOW()`,
+      [sessionId, userId, text.slice(0, 100)]
+    ).catch(() => {});
+
     // Load routing config (60s cached)
     const cfgSpan = await trace.startSpan("ai-service", "db_routing_config", { parentSpanId: rootSpan.spanId });
     const routingConfig = await getRoutingConfig(pool);
@@ -156,7 +164,7 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
       `INSERT INTO llm_request_logs (session_id, user_id, system_prompt, messages, tool_names, tools_payload, orchestrator_model)
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
       [sessionId, userId, systemPrompt, JSON.stringify(conversationMessages), openaiTools.map((t) => t.function.name), JSON.stringify(openaiTools), orchestratorModel]
-    ).then((r: { rows: { id: string }[] }) => { logRowId = r.rows[0]?.id; }).catch(() => {});
+    ).then((r: { rows: { id: string }[] }) => { logRowId = r.rows[0]?.id; }).catch((err) => { log("error", "llm_log_insert_failed", { sessionId, error: String(err) }); });
     await logSpan.end("ok", { metadata: { table: "llm_request_logs", logRowId } });
 
     log("info", "stage1_start", { orchestratorModel, requestId });
@@ -334,7 +342,7 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
     // Save to history (best effort)
     await saveMessages(
       sessionId, userId, text, fullAnswer, toolsUsed, pool, allowedTools
-    ).catch(() => ({ userMsgId: "", assistantMsgId: "" }));
+    ).catch((err) => { log("error", "save_messages_failed", { sessionId, error: String(err) }); return { userMsgId: "", assistantMsgId: "" }; });
 
     // Audit log (best effort)
     for (const toolName of toolsUsed) {

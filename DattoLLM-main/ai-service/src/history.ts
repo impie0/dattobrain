@@ -30,24 +30,28 @@ export async function saveMessages(
 ): Promise<{ userMsgId: string; assistantMsgId: string }> {
   // Ensure the session row exists before inserting messages
   await db.query(
-    `INSERT INTO chat_sessions (id, user_id, title, allowed_tools, updated_at)
-     VALUES ($1, $2, $3, $4, NOW())
-     ON CONFLICT (id) DO UPDATE SET updated_at = NOW()`,
-    [sessionId, userId, userContent.slice(0, 100), allowedTools]
+    `INSERT INTO chat_sessions (id, user_id, title, updated_at)
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (id) DO UPDATE SET title = COALESCE(NULLIF(chat_sessions.title, ''), $3), updated_at = NOW()`,
+    [sessionId, userId, userContent.slice(0, 100)]
   );
 
+  // Rough token estimate: ~4 chars per token (good enough for observability)
+  const userTokens = Math.ceil(userContent.length / 4);
+  const assistantTokens = Math.ceil(assistantContent.length / 4);
+
   const userResult = await db.query(
-    `INSERT INTO chat_messages (session_id, user_id, role, content, tools_used)
-     VALUES ($1, $2, 'user', $3, $4)
+    `INSERT INTO chat_messages (session_id, user_id, role, content, tools_used, token_count)
+     VALUES ($1, $2, 'user', $3, $4, $5)
      RETURNING id`,
-    [sessionId, userId, userContent, JSON.stringify([])]
+    [sessionId, userId, userContent, JSON.stringify([]), userTokens]
   );
 
   const assistantResult = await db.query(
-    `INSERT INTO chat_messages (session_id, user_id, role, content, tools_used)
-     VALUES ($1, $2, 'assistant', $3, $4)
+    `INSERT INTO chat_messages (session_id, user_id, role, content, tools_used, token_count)
+     VALUES ($1, $2, 'assistant', $3, $4, $5)
      RETURNING id`,
-    [sessionId, userId, assistantContent, JSON.stringify(toolsUsed)]
+    [sessionId, userId, assistantContent, JSON.stringify(toolsUsed), assistantTokens]
   );
 
   return {
