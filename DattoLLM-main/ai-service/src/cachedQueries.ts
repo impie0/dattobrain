@@ -5,7 +5,7 @@
  */
 
 import type { Pool } from "pg";
-import { semanticSearch } from "./embeddings.js";
+import { semanticSearch, semanticSearch as chatHistorySearch } from "./embeddings.js";
 
 const CACHED_NOTE = (syncedAt: string | null) =>
   `\n\n[Data from local cache — last synced: ${syncedAt ?? "unknown"}]`;
@@ -478,7 +478,7 @@ const LIVE_ONLY_TOOLS = new Set([
 ]);
 
 /** Tools that are always local (vector DB / AI-service internals) — never forwarded to MCP bridge */
-const LOCAL_ONLY_TOOLS = new Set(["semantic-search"]);
+const LOCAL_ONLY_TOOLS = new Set(["semantic-search", "search-chat-history"]);
 
 export function isLiveOnlyTool(toolName: string): boolean {
   return LIVE_ONLY_TOOLS.has(toolName);
@@ -551,6 +551,17 @@ export async function executeCachedTool(
         args["query"] as string,
         args["entityTypes"] as string[] | undefined,
         args["limit"] as number | undefined
+      );
+      return JSON.stringify(result);
+    }
+
+    // Stage 7: Chat history search (always local)
+    case "search-chat-history": {
+      const result = await chatHistorySearch(
+        db,
+        args["query"] as string,
+        ["chat_qa"],
+        Math.min(Number(args["limit"] ?? 5), 10)
       );
       return JSON.stringify(result);
     }

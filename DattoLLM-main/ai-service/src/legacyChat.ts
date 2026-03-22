@@ -4,6 +4,7 @@ import OpenAI from "openai";
 import { pool } from "./db.js";
 import { toolRegistry } from "./toolRegistry.js";
 import { loadHistory, saveMessages } from "./history.js";
+import { embedChatQA } from "./embeddings.js";
 import { callTool } from "./mcpBridge.js";
 import { buildSystemPrompt, buildSynthesizerPrompt } from "./prompt.js";
 import { executeCachedTool, isLiveOnlyTool, isLocalOnlyTool } from "./cachedQueries.js";
@@ -482,6 +483,9 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
       responsePayload: { answerLength: fullAnswer.length, answerPreview: fullAnswer.slice(0, 300) },
     });
     await trace.complete("completed", { toolCount: toolsUsed.length });
+
+    // Stage 7: Embed this Q&A pair for future semantic search + fine-tuning dataset
+    setImmediate(() => { embedChatQA(pool, sessionId).catch(() => {}); });
 
     res.json({ conversation_id: sessionId, answer: fullAnswer });
   } catch (err) {

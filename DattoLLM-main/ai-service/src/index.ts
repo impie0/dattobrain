@@ -20,7 +20,7 @@ import {
 } from "./actionProposals.js";
 import { pool } from "./db.js";
 import { runSync, runAlertSync, getSyncStatus, startScheduledSync, pauseSync, resumeSync, isSyncPaused } from "./sync.js";
-import { runEmbeddings } from "./embeddings.js";
+import { runEmbeddings, embedChatQA } from "./embeddings.js";
 import {
   handleBrowserOverview, handleBrowserSites, handleBrowserSite,
   handleBrowserDevices, handleBrowserDevice, handleBrowserDeviceSoftware,
@@ -324,8 +324,40 @@ app.post("/api/admin/sync/resume", (req, res) => {
 app.post("/api/admin/embeddings/run", (req, res) => {
   const userRole = req.headers["x-user-role"] as string | undefined;
   if (userRole !== "admin") { res.status(403).json({ error: "admin only" }); return; }
-  res.json({ started: true, message: "Embedding pipeline started in background. Check /api/admin/embeddings/stats for progress." });
-  setImmediate(() => { runEmbeddings(pool).catch(() => {}); });
+  const { type } = req.body as { type?: string };
+  res.json({ started: true, type: type ?? "all", message: "Embedding pipeline started in background. Check /api/admin/embeddings/stats for progress." });
+  if (type === "chat_qa") {
+    setImmediate(() => { embedChatQA(pool).catch(() => {}); });
+  } else {
+    setImmediate(() => { runEmbeddings(pool).catch(() => {}); });
+  }
+});
+
+// Q&A export for fine-tuning — returns JSONL-ready array of {prompt, completion} pairs
+app.get("/api/admin/embeddings/qa-export", async (req, res) => {
+  const userRole = req.headers["x-user-role"] as string | undefined;
+  if (userRole !== "admin") { res.status(403).json({ error: "admin only" }); return; }
+  try {
+    const limit = Math.min(Number(req.query["limit"] ?? 1000), 10000);
+    const q = await pool.query<Record<string, unknown>>(
+      `SELECT um.content AS prompt, am.content AS completion,
+              um.created_at, u.username
+       FROM chat_messages um
+       JOIN LATERAL (
+         SELECT content FROM chat_messages
+         WHERE session_id = um.session_id AND role = 'assistant' AND created_at > um.created_at
+         ORDER BY created_at ASC LIMIT 1
+       ) am ON true
+       LEFT JOIN users u ON u.id = um.user_id
+       WHERE um.role = 'user' AND length(am.content) > 20
+       ORDER BY um.created_at DESC
+       LIMIT $1`,
+      [limit]
+    );
+    res.json({ count: q.rowCount, pairs: q.rows });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 app.get("/api/admin/embeddings/stats", async (req, res) => {

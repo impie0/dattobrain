@@ -57,9 +57,10 @@ FROM roles r, (VALUES
 WHERE r.name = 'readonly'
 ON CONFLICT (role_id, tool_name) DO NOTHING;
 
--- Tool permissions — semantic-search (all roles — local vector search, no MCP required)
+-- Tool permissions — local vector search tools (all roles — no MCP required)
 INSERT INTO tool_permissions (role_id, tool_name)
-SELECT id, 'semantic-search' FROM roles
+SELECT r.id, t.tool_name
+FROM roles r, (VALUES ('semantic-search'), ('search-chat-history')) AS t(tool_name)
 ON CONFLICT (role_id, tool_name) DO NOTHING;
 
 -- Tool permissions — Stage 3 MV tools (all roles — read-only fleet overview)
@@ -114,6 +115,7 @@ FROM roles r, (VALUES
   ('get-rate-limit'),
   ('get-pagination-config'),
   ('semantic-search'),
+  ('search-chat-history'),
   ('get-fleet-status'),
   ('list-site-summaries'),
   ('list-critical-alerts')

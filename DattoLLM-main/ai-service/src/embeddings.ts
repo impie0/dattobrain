@@ -146,11 +146,12 @@ async function embedEntityBatch(db: Pool, entityType: string, records: EmbedReco
 // ── Public: full embedding pipeline ────────────────────────────────────────
 
 export interface EmbeddingStats {
-  devices:  number;
-  sites:    number;
-  alerts:   number;
-  software: number;
-  errors:   string | null;
+  devices:   number;
+  sites:     number;
+  alerts:    number;
+  software:  number;
+  chat_qa?:  number;
+  errors:    string | null;
 }
 
 export async function runEmbeddings(db: Pool): Promise<EmbeddingStats> {
@@ -246,16 +247,72 @@ export async function runEmbeddings(db: Pool): Promise<EmbeddingStats> {
     errors.push(`software: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  // ── Chat Q&A pairs ───────────────────────────────────────────────────────
+  // Embed recent question+answer pairs so the LLM can do RAG over past conversations.
+  try {
+    stats.chat_qa = await embedChatQA(db);
+  } catch (err) {
+    errors.push(`chat_qa: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   if (errors.length > 0) stats.errors = errors.join("; ");
 
   process.stdout.write(JSON.stringify({
     level: "info", msg: "embeddings_completed",
     devices: stats.devices, sites: stats.sites,
     alerts: stats.alerts, software: stats.software,
+    chat_qa: stats.chat_qa ?? 0,
     errors: stats.errors ?? null, ts: Date.now(),
   }) + "\n");
 
   return stats;
+}
+
+// ── Chat Q&A embedding — call after each chat or during full pipeline ───────
+
+/**
+ * Embed question+answer pairs from chat_messages.
+ * Entity_id = user message UUID (one embedding per question asked).
+ * Content: "Question: ...\nAnswer: ..." (answer capped at 800 chars to avoid noise).
+ *
+ * @param db   - Database pool
+ * @param sessionId - If provided, only embed Q&A from this session (for post-chat embed)
+ */
+export async function embedChatQA(db: Pool, sessionId?: string): Promise<number> {
+  const whereExtra = sessionId ? "AND um.session_id = $2::uuid" : "";
+  const params: unknown[] = sessionId ? [5000, sessionId] : [5000];
+
+  const q = await db.query<Record<string, unknown>>(
+    `SELECT
+       um.id         AS entity_id,
+       um.content    AS question,
+       am.content    AS answer,
+       um.created_at
+     FROM chat_messages um
+     JOIN LATERAL (
+       SELECT content FROM chat_messages
+       WHERE session_id = um.session_id
+         AND role = 'assistant'
+         AND created_at > um.created_at
+       ORDER BY created_at ASC LIMIT 1
+     ) am ON true
+     WHERE um.role = 'user'
+       AND length(am.content) > 20
+       ${whereExtra}
+     ORDER BY um.created_at DESC
+     LIMIT $1`,
+    params
+  );
+
+  if (q.rows.length === 0) return 0;
+
+  const records: EmbedRecord[] = q.rows.map(row => ({
+    entityType: "chat_qa",
+    entityId:   row["entity_id"] as string,
+    contentText: `Question: ${row["question"]}\nAnswer: ${(row["answer"] as string).slice(0, 800)}`,
+  }));
+
+  return embedEntityBatch(db, "chat_qa", records);
 }
 
 // ── Public: semantic search ─────────────────────────────────────────────────
@@ -368,6 +425,25 @@ async function fetchEntityDetail(db: Pool, entityType: string, entityId: string)
           [entityId]
         );
         return q.rows[0] ?? null;
+      }
+      case "chat_qa": {
+        const q = await db.query<Record<string, unknown>>(
+          `SELECT um.id, um.content AS question, am.content AS answer,
+                  um.created_at, u.username
+           FROM chat_messages um
+           JOIN LATERAL (
+             SELECT content FROM chat_messages
+             WHERE session_id = um.session_id AND role = 'assistant' AND created_at > um.created_at
+             ORDER BY created_at ASC LIMIT 1
+           ) am ON true
+           LEFT JOIN users u ON u.id = um.user_id
+           WHERE um.id = $1`,
+          [entityId]
+        );
+        if (!q.rows[0]) return null;
+        const row = q.rows[0] as Record<string, unknown>;
+        // Truncate answer for display in tool results
+        return { ...row, answer: (row["answer"] as string).slice(0, 600) };
       }
       default:
         return null;
