@@ -1,6 +1,6 @@
 # Database Schema Reference
 
-> **Datto RMM AI Platform** | PostgreSQL 16 + pgvector + pg_trgm | 29 tables across 3 domains
+> **Datto RMM AI Platform** | PostgreSQL 16 + pgvector + pg_trgm | 29 tables + 5 materialized views across 3 domains
 > This file is the authoritative reference for every table, column, index, FK, and design decision in the platform database.
 > Parent: [[Datto RMM AI Platform|PLATFORM_BRAIN]] · See also: [[PostgreSQL]]
 
@@ -59,7 +59,7 @@
 
 ### 2.1 Domain Overview
 
-All 28 tables grouped by domain. Arrows show cross-domain FK connections (user identity flowing into Chat and Auth tables).
+All 29 tables grouped by domain (plus 5 materialized views from migration 025). Arrows show cross-domain FK connections (user identity flowing into Chat and Auth tables).
 
 ```mermaid
 graph TD
@@ -224,12 +224,14 @@ erDiagram
         uuid id PK
         uuid session_id
         uuid user_id
-        text system_prompt
-        jsonb messages
-        text[] tool_names
         text orchestrator_model
         text synthesizer_model
         text[] tools_called
+        text data_mode
+        boolean prequery_hit
+        integer total_tokens
+        integer orch_iterations
+        integer total_duration_ms
         timestamptz created_at
     }
     llm_routing_config {
@@ -401,6 +403,8 @@ pg_trgm     -- trigram similarity for fuzzy text search (typo-tolerant site/devi
 | `016_audit_log_rls.sql` | Audit log immutability via PostgreSQL RLS (SEC-Audit-001) |
 | `017_request_traces.sql` | Distributed tracing tables for observability spans |
 | `018_fuzzy_search.sql` | `pg_trgm` extension + GIN trigram indexes on `datto_cache_sites.name`, `datto_cache_devices.hostname`, `datto_cache_devices.site_name` |
+| `025_materialized_views.sql` | 5 materialized views: `mv_fleet_status`, `mv_site_summary`, `mv_critical_alerts`, `mv_os_distribution`, `mv_alert_priority` — refreshed after every sync via `REFRESH MATERIALIZED VIEW CONCURRENTLY` |
+| `026_llm_token_tracking.sql` | Adds 19 columns to `llm_request_logs`: per-stage token counts, providers, timing, pre-query hit tracking, tool result size |
 | `seed.sql` | 4 default users, 4 roles, tool assignments, tool_policies, `llm_request_logs` table |
 
 > `tool_policies`, `approvals`, `user_tool_overrides`, and `llm_request_logs` are created in `seed.sql`, not numbered migrations.
@@ -645,17 +649,37 @@ LIMIT 5;
 Full payload log of every LLM request — system prompt, messages, tools, models used. Written by `legacyChat.ts` at the start of each request and updated after Stage 2 completes.
 
 ```sql
-id                 uuid PRIMARY KEY DEFAULT uuid_generate_v4()
-session_id         uuid               -- references chat_sessions (no FK — may be ad-hoc)
-user_id            uuid               -- references users (no FK — log survives user deletion)
-system_prompt      text               -- full system prompt sent to Stage 1
-messages           jsonb              -- full OpenAI-format conversation array
-tool_names         text[]             -- names of tools available (Stage 1 definitions)
-tools_payload      jsonb              -- full OpenAI tool definition objects
-orchestrator_model text               -- Stage 1 model that was used
-synthesizer_model  text               -- Stage 2 model (null if Stage 2 was skipped)
-tools_called       text[] DEFAULT '{}' -- tools actually called during the request
-created_at         timestamptz DEFAULT now()
+id                      uuid PRIMARY KEY DEFAULT uuid_generate_v4()
+session_id              uuid               -- references chat_sessions (no FK — may be ad-hoc)
+user_id                 uuid               -- references users (no FK — log survives user deletion)
+system_prompt           text               -- full system prompt sent to Stage 1
+messages                jsonb              -- full OpenAI-format conversation array
+tool_names              text[]             -- names of tools available (Stage 1 definitions)
+tools_payload           jsonb              -- full OpenAI tool definition objects
+orchestrator_model      text               -- Stage 1 model that was used
+synthesizer_model       text               -- Stage 2 model (null if Stage 2 was skipped)
+tools_called            text[] DEFAULT '{}' -- tools actually called during the request
+created_at              timestamptz DEFAULT now()
+-- migration 026: per-stage token tracking
+data_mode               text               -- 'cached' | 'live'
+prequery_hit            boolean DEFAULT false -- true if pre-query resolved the request
+prequery_tool           text               -- tool name that pre-query matched
+orchestrator_provider   text               -- e.g. 'openrouter', 'ollama'
+orch_prompt_tokens      integer DEFAULT 0  -- Stage 1 prompt tokens (summed across iterations)
+orch_completion_tokens  integer DEFAULT 0  -- Stage 1 completion tokens
+orch_total_tokens       integer DEFAULT 0  -- Stage 1 total tokens
+orch_iterations         integer DEFAULT 0  -- number of Stage 1 loop iterations
+synth_provider          text               -- Stage 2 provider
+synth_prompt_tokens     integer DEFAULT 0  -- Stage 2 prompt tokens
+synth_completion_tokens integer DEFAULT 0  -- Stage 2 completion tokens
+synth_total_tokens      integer DEFAULT 0  -- Stage 2 total tokens
+total_prompt_tokens     integer DEFAULT 0  -- combined prompt tokens
+total_completion_tokens integer DEFAULT 0  -- combined completion tokens
+total_tokens            integer DEFAULT 0  -- combined total tokens
+orch_duration_ms        integer            -- Stage 1 wall-clock time
+synth_duration_ms       integer            -- Stage 2 wall-clock time
+total_duration_ms       integer            -- total wall-clock time
+tool_result_chars       integer DEFAULT 0  -- total characters in tool results
 ```
 
 **Write pattern:** INSERT at Stage 1 start (with `orchestrator_model`); UPDATE after Stage 2 (adds `synthesizer_model`, `tools_called`).
@@ -1060,7 +1084,7 @@ datto_sync_log  (independent, append-only)
 | `audit_logs` | `user_id` | B-tree | Filter by user |
 | `audit_logs` | `event_type` | B-tree | Filter by event |
 | `audit_logs` | `created_at` | B-tree | Time-range queries |
-| `chat_messages` | `embedding` | ivfflat cosine | Vector similarity search |
+| `chat_messages` | `embedding` | HNSW cosine | Vector similarity search (migration 014) |
 | `datto_cache_sites` | `name` | B-tree | Site name search |
 | `datto_cache_devices` | `hostname` | B-tree | Hostname search |
 | `datto_cache_devices` | `site_uid` | B-tree | Devices by site |
@@ -1076,6 +1100,8 @@ datto_sync_log  (independent, append-only)
 | `datto_cache_sites` | `name` | GIN (gin_trgm_ops) | Fuzzy site name search (migration 018) |
 | `datto_cache_devices` | `hostname` | GIN (gin_trgm_ops) | Fuzzy hostname search (migration 018) |
 | `datto_cache_devices` | `site_name` | GIN (gin_trgm_ops) | Fuzzy site name filter on devices (migration 018) |
+| `llm_request_logs` | `(created_at DESC, total_tokens)` | B-tree | Token analysis queries (migration 026) |
+| `llm_request_logs` | `(orchestrator_provider, synth_provider, created_at DESC)` | B-tree | Provider analysis queries (migration 026) |
 
 ---
 
@@ -1114,4 +1140,4 @@ The raw Datto API response is stored alongside the indexed scalar columns. This 
 ---
 
 *DATABASE.md — Datto RMM AI Platform — internal use only.*
-*Reflects schema as of migration 018 (2026-03-19). Update this file whenever a new migration is added.*
+*Reflects schema as of migration 026 (2026-03-22). Update this file whenever a new migration is added.*

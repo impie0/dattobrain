@@ -24,22 +24,20 @@ export const accountTools: ToolDef[] = [
   },
   {
     name: "list-open-alerts",
-    description: "List all open (unresolved) alerts across the entire account",
+    description: "List open (unresolved) alerts across the account. Returns a summary with top 10 most recent alerts and priority breakdown. For site-specific alerts use list-site-open-alerts. For device-specific alerts use list-device-open-alerts.",
     inputSchema: {
       type: "object",
       properties: {
-        ...PAGE_PROPS,
         muted: { type: "boolean", description: "Filter by muted status" },
       },
     },
   },
   {
     name: "list-resolved-alerts",
-    description: "List resolved alerts across the account",
+    description: "List recently resolved alerts. Returns top 10 most recently resolved. For site-specific results use list-site-resolved-alerts.",
     inputSchema: {
       type: "object",
       properties: {
-        ...PAGE_PROPS,
         muted: { type: "boolean", description: "Filter by muted status" },
       },
     },
@@ -57,15 +55,15 @@ export const accountTools: ToolDef[] = [
   },
   {
     name: "list-devices",
-    description: "List devices in the account. ALWAYS use filters (hostname, siteName, deviceType, operatingSystem) when looking for specific devices — this avoids loading all devices. Supports fuzzy matching on hostname and siteName.",
+    description: "List devices in the account. Without filters: returns accurate total/online/offline counts and OS breakdown (use this for count questions). With filters: returns matching devices (max 15). Use get-device with a deviceUid for full device details.",
     inputSchema: {
       type: "object",
       properties: {
-        ...PAGE_PROPS,
-        hostname: { type: "string", description: "Filter by hostname (server-side contains-match)" },
-        siteName: { type: "string", description: "Filter by site name (server-side contains-match — returns devices at sites whose name includes this string)" },
-        deviceType: { type: "string", description: "Filter by device type" },
-        operatingSystem: { type: "string", description: "Filter by OS (partial match)" },
+        hostname: { type: "string", description: "Filter by hostname (fuzzy match — handles typos)" },
+        siteName: { type: "string", description: "Filter by site name (fuzzy match)" },
+        online: { type: "boolean", description: "Filter by online status (true=online, false=offline)" },
+        deviceClass: { type: "string", description: "Filter by device class: 'device', 'esxihost', 'printer'" },
+        operatingSystem: { type: "string", description: "Filter by OS (partial match, e.g. 'Windows 11', 'macOS')" },
         filterId: { type: "number", description: "Apply a device filter by ID" },
       },
     },

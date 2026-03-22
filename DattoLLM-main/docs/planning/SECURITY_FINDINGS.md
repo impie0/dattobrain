@@ -333,6 +333,66 @@ If the daily sync fails silently, no one knows until users notice stale data. Th
 
 ---
 
+### SEC-HIST-001 · Cross-user session hijack via missing user_id filter
+
+**Severity:** High
+**Location:** [[AI Service]] `src/history.ts`
+
+**Problem:**
+Chat history queries did not filter by `user_id`, allowing a user to view another user's chat sessions by supplying a known `session_id`.
+
+**Remediation:**
+Add `user_id` filter to all history queries — `WHERE user_id = $1 AND session_id = $2`.
+
+**Status:** ✅ Implemented — `history.ts` now includes `user_id` in all session and message queries.
+
+---
+
+### SEC-TOOL-001 · Tool argument parse failures silently return empty object
+
+**Severity:** Medium
+**Location:** [[AI Service]] `src/chat.ts`, `src/legacyChat.ts`
+
+**Problem:**
+When the LLM returned malformed JSON in tool call arguments, the parse failure was caught and replaced with `{}`. This silently executed tools with missing parameters, producing confusing results.
+
+**Remediation:**
+Throw an error on parse failure instead of substituting `{}`. The agentic loop should report the parse error back to the LLM for self-correction.
+
+**Status:** ✅ Implemented — parse failures now throw errors that are returned to the LLM as tool error results.
+
+---
+
+### SEC-RATE-001 · No rate limiting on chat endpoint
+
+**Severity:** Medium
+**Location:** [[AI Service]] `src/index.ts`
+
+**Problem:**
+The `POST /api/chat` endpoint had no rate limiting. A user could flood the endpoint with requests, burning LLM API credits.
+
+**Remediation:**
+Add per-user rate limiting of 10 requests per minute on the chat endpoint.
+
+**Status:** ✅ Implemented — 10 req/min per-user rate limit applied to the chat endpoint.
+
+---
+
+### SEC-DENY-001 · Tool denial responses inconsistent
+
+**Severity:** Low
+**Location:** [[AI Service]] `src/permissions.ts`
+
+**Problem:**
+When a tool call was denied due to insufficient permissions, the error format varied depending on where the denial was caught. Some paths returned raw errors, others returned structured responses.
+
+**Remediation:**
+Normalize all tool denial responses to a consistent structured format that the LLM can interpret clearly.
+
+**Status:** ✅ Implemented — `permissions.ts` now returns a normalized denial response across all code paths.
+
+---
+
 ## Resolved
 
 | ID | Issue | Fixed in |
@@ -348,6 +408,10 @@ If the daily sync fails silently, no one knows until users notice stale data. Th
 | SEC-014 | IVFFlat index degrades at scale | `db/014_hnsw_index.sql` HNSW migration |
 | SEC-015 | No context overflow protection | `ai-service/src/chat.ts`, `ai-service/src/legacyChat.ts` |
 | SEC-016 | Sync failure has no alerting | `ai-service/src/index.ts` `/api/admin/sync/health` |
+| SEC-HIST-001 | Cross-user session hijack (missing user_id filter) | `ai-service/src/history.ts` user_id filter added |
+| SEC-TOOL-001 | Tool arg parse silently returns empty `{}` | `ai-service/src/chat.ts`, `ai-service/src/legacyChat.ts` — error on parse failure |
+| SEC-RATE-001 | No rate limiting on chat endpoint | `ai-service/src/index.ts` — 10 req/min per-user |
+| SEC-DENY-001 | Inconsistent tool denial responses | `ai-service/src/permissions.ts` — normalized denial format |
 | ARCH-002 | Monolithic toolRegistry.ts | `ai-service/src/tools/` domain split (37 tools across 9 files) |
 | — | web-app on both Docker networks | docker-compose.yml |
 | — | etcd no authentication | docker-compose.yml (documented as accepted risk) |

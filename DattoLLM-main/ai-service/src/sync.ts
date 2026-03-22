@@ -96,6 +96,28 @@ async function fetchAllPages<T>(
   return items;
 }
 
+// ── Stage 3: Materialized view refresh ────────────────────────────────────
+
+const MV_NAMES = [
+  "mv_fleet_status",
+  "mv_site_summary",
+  "mv_critical_alerts",
+  "mv_os_distribution",
+  "mv_alert_priority",
+];
+
+async function refreshMaterializedViews(db: Pool): Promise<void> {
+  for (const mv of MV_NAMES) {
+    try {
+      await db.query(`REFRESH MATERIALIZED VIEW CONCURRENTLY ${mv}`);
+    } catch {
+      // If CONCURRENTLY fails (no unique index on first run), try without
+      try { await db.query(`REFRESH MATERIALIZED VIEW ${mv}`); } catch { /* skip */ }
+    }
+  }
+  process.stdout.write(JSON.stringify({ level: "info", msg: "materialized_views_refreshed", views: MV_NAMES.length, ts: Date.now() }) + "\n");
+}
+
 // ── Individual sync functions ──────────────────────────────────────────────
 
 async function syncAccount(db: Pool): Promise<void> {
@@ -648,6 +670,8 @@ export async function runAlertSync(db: Pool, triggeredBy = "schedule"): Promise<
          alerts_open_synced = $1, alerts_resolved_synced = $2 WHERE id = $3`,
       [open, resolved, logId]
     );
+    // Stage 3: Refresh materialized views after alert sync (best effort)
+    await refreshMaterializedViews(db);
   } catch (err) {
     await db.query(
       `UPDATE datto_sync_log SET status = 'failed', completed_at = NOW(), error = $1 WHERE id = $2`,
@@ -752,6 +776,9 @@ export async function runSync(db: Pool, triggeredBy = "schedule"): Promise<void>
        WHERE id = $12`,
       [sitesCount, devicesCount, open, resolved, 0, audits, software, esxi, printers, auditErrors, auditLastError, logId]
     );
+
+    // Stage 3: Refresh materialized views after sync (best effort)
+    await refreshMaterializedViews(db);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     await db.query(

@@ -296,6 +296,7 @@ const LLM_MODELS = [
   { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5",    provider: "anthropic", canOrchestrate: true  },
   { id: "claude-sonnet-4-5",         label: "Claude Sonnet 4.5",   provider: "anthropic", canOrchestrate: true  },
   { id: "claude-opus-4-6",           label: "Claude Opus 4.6",     provider: "anthropic", canOrchestrate: true  },
+  { id: "local/qwen3-1.7b",           label: "Qwen3 1.7B (Local)",   provider: "ollama",    canOrchestrate: false },
   { id: "deepseek/deepseek-r1",      label: "DeepSeek R1",         provider: "deepseek",  canOrchestrate: false },
   { id: "deepseek/deepseek-chat",    label: "DeepSeek Chat",       provider: "deepseek",  canOrchestrate: false },
   { id: "gemini/gemini-2.0-flash",   label: "Gemini 2.0 Flash",    provider: "google",    canOrchestrate: false },

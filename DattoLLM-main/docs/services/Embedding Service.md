@@ -35,10 +35,14 @@ description: Converts text to 1024-dimensional Voyage-3 embedding vectors for se
 > [!warning] API Key Required
 > Requires a real `EMBEDDING_API_KEY` in `.env`. Without it, embeddings silently fail and vector search is disabled.
 
+## Future: Local Embeddings via Ollama
+
+The [[Ollama]] service includes `nomic-embed-text` (768 dimensions, ~0.3 GB). A future stage could route embedding requests to `ollama:11434` for fully local, zero-cost embeddings. This would require a schema migration from `vector(1024)` to `vector(768)` in the [[Chat Messages Table]].
+
 ## Connections
 
 - [[connections/AI to Embedding|AI → Embedding]] — `POST /embed` for text-to-vector conversion
 
 ## Related Nodes
 
-[[AI Service]] · [[Chat Messages Table]] · [[Chat Request Flow]] · [[Prompt Builder]] · [[PostgreSQL]] · [[Network Isolation]]
+[[AI Service]] · [[Chat Messages Table]] · [[Chat Request Flow]] · [[Prompt Builder]] · [[PostgreSQL]] · [[Network Isolation]] · [[Ollama]]

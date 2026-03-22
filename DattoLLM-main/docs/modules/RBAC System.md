@@ -8,7 +8,7 @@ aliases:
   - RBAC
   - Role-Based Access Control
   - Permissions
-description: Five-layer role-based access control — permissions computed at login, sealed into JWT, enforced at prompt, ai-service gate, bridge, MCP registry, and write gate layers
+description: Six-layer role-based access control — permissions computed at login, sealed into JWT, enforced at pre-query, prompt, ai-service gate, bridge, MCP registry, and write gate layers
 ---
 
 # RBAC System
@@ -16,13 +16,14 @@ description: Five-layer role-based access control — permissions computed at lo
 > Part of the [[Datto RMM AI Platform|PLATFORM_BRAIN]] knowledge graph · **Module** node
 
 > [!info] Defense in depth
-> ==Five independent layers== ensure that even if one permission check is bypassed, the remaining layers still block unauthorized tool access.
+> ==Six independent layers== ensure that even if one permission check is bypassed, the remaining layers still block unauthorized tool access.
 
-**Purpose:** Five-layer role-based access control ensuring users can only call tools they are authorised for. Permissions computed once at login and sealed into the [[JWT Model|JWT]].
+**Purpose:** Six-layer role-based access control ensuring users can only call tools they are authorised for. Permissions computed once at login and sealed into the [[JWT Model|JWT]].
 
 ## Files
 
 - `auth-service/src/handlers.ts` — query + embed into JWT
+- `ai-service/src/preQuery.ts` — pre-query RBAC: checks `allowedTools` before executing any pattern-matched query
 - `ai-service/src/permissions.ts` — SEC-Cache-001: hard permission gate for cached and live paths
 - `ai-service/src/legacyChat.ts` + `chat.ts` — prompt filter + SEC-Cache-001 call-site checks
 - `ai-service/src/cachedQueries.ts` — SEC-Cache-001: inner guard on `executeCachedTool()`
@@ -62,10 +63,11 @@ readonly → list-sites, get-system-status,
            get-rate-limit, get-pagination-config  (4 tools)
 ```
 
-## Five Permission Layers
+## Six Permission Layers
 
 | Layer | Where | What it stops |
 |---|---|---|
+| **0 — Pre-query gate** | `preQuery.ts` | Each pattern requires a specific tool permission (`requiresTool`); if user lacks it, falls through to LLM silently — does not reveal pattern existence |
 | **1 — Prompt** | [[Prompt Builder]] | Model never sees definitions of unauthorised tools |
 | **1.5 — ai-service gate (SEC-Cache-001)** | `permissions.ts` + `chat.ts` / `legacyChat.ts` / `cachedQueries.ts` | Rejects tool names not in `allowedTools` before any execution — covers both cached and live paths |
 | **2 — Bridge gate (SEC-MCP-001)** | [[MCP Bridge]] `index.ts` | Calls auth-service introspect for DB-sourced `allowedTools`; ignores caller-supplied list |

@@ -48,6 +48,9 @@ description: Constructs the LLM system prompt from platform instructions, filter
 **`buildSynthesizerPrompt` called by:** `legacyChat.ts` · `chat.ts` (Stage 2 synthesizer prompt)
 **Receives:** Filtered tool defs from [[Tool Router]], similar messages from [[Embedding Service]] / pgvector
 
+> [!note] Pre-query bypass
+> When a question matches a pre-query pattern in `preQuery.ts`, the Prompt Builder is never invoked — the answer is returned directly from materialized views without any LLM call. See [[Chat Request Flow]] for the full four-stage pipeline.
+
 ## Related Nodes
 
 [[Tool Router]] · [[RBAC System]] · [[Chat Request Flow]] · [[Embedding Service]] · [[AI Service]] · [[JWT Model]] · [[Write Tool State Machine]] · [[ActionProposal]] · [[Chat Messages Table]]

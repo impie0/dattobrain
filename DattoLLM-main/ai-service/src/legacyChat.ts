@@ -8,6 +8,7 @@ import { callTool } from "./mcpBridge.js";
 import { buildSystemPrompt, buildSynthesizerPrompt } from "./prompt.js";
 import { executeCachedTool, isLiveOnlyTool } from "./cachedQueries.js";
 import { checkAndAuditToolPermission, toolDeniedMessage } from "./permissions.js";
+import { tryPreQuery } from "./preQuery.js";
 import {
   getRoutingConfig,
   selectOrchestratorModel,
@@ -58,7 +59,7 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
   const userId = req.headers["x-user-id"] as string | undefined;
   const allowedToolsHeader = req.headers["x-allowed-tools"] as string | undefined;
   const sessionId = (req.headers["x-session-id"] as string | undefined) ?? randomUUID();
-  const { question, message } = req.body as { question?: string; message?: string };
+  const { question, message, data_mode: requestDataMode } = req.body as { question?: string; message?: string; data_mode?: string };
   // SEC-MCP-001: Extract JWT so the MCP bridge can independently verify permissions
   const authHeader = req.headers["authorization"] as string | undefined;
   const jwtToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
@@ -88,6 +89,24 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
   // ── Tracing ─────────────────────────────────────────────────────────────
   const trace = new TraceContext(pool, requestId);
   await trace.init({ userId, sessionId, question: text });
+
+  // ── Stage 4: Pre-Query — skip LLM for simple questions ──────────────────
+  const preQueryResult = await tryPreQuery(text, allowedTools, userId, pool);
+  if (preQueryResult) {
+    const pqSpan = await trace.startSpan("ai-service", "prequery_hit", {
+      requestPayload: { question: text.slice(0, 200), pattern: preQueryResult.toolUsed },
+    });
+    await pqSpan.end("ok", {
+      metadata: { tool: preQueryResult.toolUsed, source: "materialized_view", llmTokens: 0 },
+      responsePayload: { answerLength: preQueryResult.answer.length, answerPreview: preQueryResult.answer.slice(0, 300) },
+    });
+    await trace.complete("completed", { toolCount: 1 });
+    // Save to history so it appears in chat
+    await saveMessages(sessionId, userId, text, preQueryResult.answer, [preQueryResult.toolUsed], pool, allowedTools)
+      .catch(() => {});
+    res.json({ conversation_id: sessionId, answer: preQueryResult.answer });
+    return;
+  }
 
   try {
     const rootSpan = await trace.startSpan("ai-service", "incoming_request", {
@@ -119,13 +138,25 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
       [sessionId]
     ).catch(() => ({ rows: [] }));
     await sessSpan.end("ok", { metadata: { found: sessionRow.rows.length > 0, sessionId } });
+    // Data mode priority: request body > session DB > global default
+    const sessionDataMode = (sessionRow.rows[0] as { data_mode?: string } | undefined)?.data_mode;
     const dataMode: "cached" | "live" =
-      (sessionRow.rows[0] as { data_mode?: string } | undefined)?.data_mode === "live"
-        ? "live"
+      (requestDataMode === "live" || requestDataMode === "cached") ? requestDataMode
+        : sessionDataMode === "live" ? "live"
+        : sessionDataMode === "cached" ? "cached"
         : routingConfig.default_data_mode === "live" ? "live" : "cached";
+    // Persist the mode to the session so it sticks for future messages
+    if (requestDataMode === "live" || requestDataMode === "cached") {
+      pool.query(
+        `INSERT INTO chat_sessions (id, user_id, data_mode, updated_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (id) DO UPDATE SET data_mode = EXCLUDED.data_mode, updated_at = NOW()`,
+        [sessionId, userId, requestDataMode]
+      ).catch(() => {});
+    }
 
     const histSpan = await trace.startSpan("ai-service", "db_load_history", { parentSpanId: rootSpan.spanId, requestPayload: { sessionId } });
-    const history = await loadHistory(sessionId, pool).catch(() => [] as OpenAI.ChatCompletionMessageParam[]);
+    const history = await loadHistory(sessionId, userId, pool).catch(() => [] as OpenAI.ChatCompletionMessageParam[]);
     await histSpan.end("ok", { metadata: { messageCount: history.length, sessionId } });
     const filteredTools = toolRegistry.filter((t) => allowedTools.includes(t.name));
     const systemPrompt = buildSystemPrompt([]);
@@ -156,6 +187,10 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
     // SEC-Routing-001: scope-based high-risk routing for both stages (consistent with chat.ts)
     let totalToolResultLength = 0;
     let fullStage1Content = "";
+    // Token tracking accumulators
+    let orchPromptTokens = 0, orchCompletionTokens = 0, orchTotalTokens = 0;
+    let synthPromptTokens = 0, synthCompletionTokens = 0, synthTotalTokens = 0;
+    const orchStartTime = Date.now();
 
     // Log the full payload before sending to LLM — capture ID for model update later
     const logSpan = await trace.startSpan("ai-service", "db_llm_request_log", { parentSpanId: rootSpan.spanId });
@@ -176,9 +211,14 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
     const CONTEXT_OVERFLOW_CHARS = 100_000; // ~25k tokens, safe limit for Haiku 32k ctx
 
     // ── STAGE 1: Orchestrator — tool selection loop ───────────────────────────
+    const MAX_TOOL_ITERATIONS = 12; // Safety cap — prevents runaway tool loops
     let stage1Iteration = 0;
     while (true) {
       stage1Iteration++;
+      if (stage1Iteration > MAX_TOOL_ITERATIONS) {
+        log("warn", "max_tool_iterations_reached", { requestId, iterations: stage1Iteration });
+        break;
+      }
       const llmSpan = await trace.startSpan("ai-service", `llm_stage1_iter_${stage1Iteration}`, {
         parentSpanId: rootSpan.spanId,
         requestPayload: { model: orchestratorModel, messageCount: conversationMessages.length },
@@ -194,7 +234,23 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
         max_tokens: 4096,
         tools: openaiTools.length > 0 ? openaiTools : undefined,
       });
-      await litellmSpan.end("ok", { metadata: { model: orchestratorModel, finishReason: completion.choices[0]?.finish_reason }, responsePayload: { toolCallCount: completion.choices[0]?.message.tool_calls?.length ?? 0 } });
+      const usage = completion.usage;
+      orchPromptTokens += usage?.prompt_tokens ?? 0;
+      orchCompletionTokens += usage?.completion_tokens ?? 0;
+      orchTotalTokens += usage?.total_tokens ?? 0;
+      await litellmSpan.end("ok", {
+        metadata: {
+          model: orchestratorModel,
+          provider: orchestratorModel.startsWith("local/") ? "ollama" : "cloud",
+          finishReason: completion.choices[0]?.finish_reason,
+        },
+        responsePayload: {
+          toolCallCount: completion.choices[0]?.message.tool_calls?.length ?? 0,
+          promptTokens: usage?.prompt_tokens ?? 0,
+          completionTokens: usage?.completion_tokens ?? 0,
+          totalTokens: usage?.total_tokens ?? 0,
+        },
+      });
 
       const choice = completion.choices[0];
       const assistantMsg = choice.message;
@@ -203,14 +259,14 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
       if (choice.finish_reason !== "tool_calls" || !assistantMsg.tool_calls?.length) {
         await llmSpan.end("ok", {
           metadata: { model: orchestratorModel, finishReason: choice.finish_reason, toolCallCount: 0 },
-          responsePayload: { textLength: (assistantMsg.content ?? "").length },
+          responsePayload: { textLength: (assistantMsg.content ?? "").length, tokens: usage?.total_tokens ?? 0 },
         });
         break;
       }
 
       await llmSpan.end("ok", {
         metadata: { model: orchestratorModel, finishReason: choice.finish_reason, toolCallCount: assistantMsg.tool_calls.length },
-        responsePayload: { toolCalls: assistantMsg.tool_calls.map(tc => ({ name: tc.function.name, args: tc.function.arguments.slice(0, 200) })) },
+        responsePayload: { toolCalls: assistantMsg.tool_calls.map(tc => ({ name: tc.function.name, args: tc.function.arguments.slice(0, 200) })), tokens: usage?.total_tokens ?? 0 },
       });
 
       conversationMessages.push({
@@ -248,19 +304,25 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
 
         let toolInput: Record<string, unknown>;
         try { toolInput = JSON.parse(tc.function.arguments) as Record<string, unknown>; }
-        catch { toolInput = {}; }
+        catch {
+          // SEC: Don't default to empty args — empty args on list tools causes full data dump
+          log("warn", "tool_args_parse_failed", { toolName, rawArgs: tc.function.arguments?.slice(0, 200), requestId });
+          conversationMessages.push({ role: "tool" as const, tool_call_id: tc.id, content: `Error: Invalid tool arguments. Please provide valid JSON arguments for ${toolName}.` });
+          continue;
+        }
 
-        const toolSpan = await trace.startSpan("ai-service", "tool_call", {
+        const isCached = dataMode === "cached" && !isLiveOnlyTool(toolName);
+        const toolSpan = await trace.startSpan("ai-service", `tool_call [${toolName}] ${isCached ? "CACHED" : "LIVE→MCP"}`, {
           parentSpanId: rootSpan.spanId,
-          requestPayload: { toolName, toolInput, dataMode, cached: dataMode === "cached" && !isLiveOnlyTool(toolName) },
+          requestPayload: { toolName, toolInput, dataMode, source: isCached ? "postgres_cache" : "mcp_bridge→mcp_server→datto_api" },
         });
 
         let resultText: string;
-        if (dataMode === "cached" && !isLiveOnlyTool(toolName)) {
+        if (isCached) {
           try {
             const cacheSpan = await trace.startSpan("ai-service", "db_cached_query", { parentSpanId: toolSpan.spanId, requestPayload: { toolName, toolInput } });
             resultText = await executeCachedTool(toolName, toolInput, pool, allowedTools);
-            await cacheSpan.end("ok", { metadata: { toolName, source: "datto_cache" }, responsePayload: { resultLength: resultText.length } });
+            await cacheSpan.end("ok", { metadata: { toolName, source: "datto_cache" }, responsePayload: { resultLength: resultText.length, resultPreview: resultText.slice(0, 300) } });
           } catch {
             const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken, trace.traceId, toolSpan.spanId);
             resultText = typeof liveResult.result === "string" ? liveResult.result : JSON.stringify(liveResult.result);
@@ -268,6 +330,13 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
         } else {
           const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken, trace.traceId, toolSpan.spanId);
           resultText = typeof liveResult.result === "string" ? liveResult.result : JSON.stringify(liveResult.result);
+        }
+
+        // Stage 2a: Hard cap on individual tool result size
+        const MAX_TOOL_RESULT_CHARS = 8_000;
+        if (resultText.length > MAX_TOOL_RESULT_CHARS) {
+          log("warn", "tool_result_truncated", { toolName, original: resultText.length, truncated: MAX_TOOL_RESULT_CHARS, requestId });
+          resultText = resultText.slice(0, MAX_TOOL_RESULT_CHARS) + `\n\n[Result truncated from ${resultText.length} to ${MAX_TOOL_RESULT_CHARS} chars. Use more specific filters to narrow results.]`;
         }
 
         totalToolResultLength += resultText.length;
@@ -305,37 +374,76 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
         totalToolResultLength,
       });
 
-      const synthSpan = await trace.startSpan("ai-service", "llm_stage2_synthesizer", {
+      const synthSpan = await trace.startSpan("ai-service", `llm_stage2_synthesizer [${synthModel}]`, {
         parentSpanId: rootSpan.spanId,
-        requestPayload: { model: synthModel, messageCount: conversationMessages.length, totalToolResultLength },
+        requestPayload: {
+          model: synthModel,
+          provider: synthModel.startsWith("local/") ? "ollama" : "cloud",
+          messageCount: conversationMessages.length,
+          totalToolResultLength,
+          dataMode,
+          toolsUsed,
+        },
       });
 
       const synthLitellmSpan = await trace.startSpan("litellm", "chat_completion", {
         parentSpanId: synthSpan.spanId,
-        requestPayload: { model: synthModel, stream: false, endpoint: "/v1/chat/completions", stage: "synthesizer" },
+        requestPayload: { model: synthModel, provider: synthModel.startsWith("local/") ? "ollama" : "cloud", stream: false, endpoint: "/v1/chat/completions", stage: "synthesizer" },
       });
-      fullAnswer = await synthesize({
+      const synthResult = await synthesize({
         model: synthModel,
         systemPrompt: buildSynthesizerPrompt([]),
         messages: compressForSynthesizer(conversationMessages),
         maxTokens: 4096,
       });
-      await synthLitellmSpan.end("ok", { metadata: { model: synthModel }, responsePayload: { answerLength: fullAnswer.length } });
+      fullAnswer = synthResult.content;
+      synthPromptTokens = synthResult.usage.prompt_tokens;
+      synthCompletionTokens = synthResult.usage.completion_tokens;
+      synthTotalTokens = synthResult.usage.total_tokens;
+      await synthLitellmSpan.end("ok", {
+        metadata: { model: synthModel, provider: synthModel.startsWith("local/") ? "ollama" : "cloud" },
+        responsePayload: {
+          answerLength: fullAnswer.length, answerPreview: fullAnswer.slice(0, 300),
+          promptTokens: synthPromptTokens, completionTokens: synthCompletionTokens, totalTokens: synthTotalTokens,
+        },
+      });
 
       await synthSpan.end("ok", {
-        metadata: { model: synthModel, highRiskInScope, dataMode },
-        responsePayload: { answerLength: fullAnswer.length },
+        metadata: { model: synthModel, provider: synthModel.startsWith("local/") ? "ollama" : "cloud", highRiskInScope, dataMode },
+        responsePayload: {
+          answerLength: fullAnswer.length,
+          promptTokens: synthPromptTokens, completionTokens: synthCompletionTokens, totalTokens: synthTotalTokens,
+        },
       });
     } else {
       // No tools called — Stage 1 answer is the final response
       fullAnswer = fullStage1Content;
     }
 
-    // Update log with synthesizer model and tools actually called
+    // Update log with full token tracking
+    const orchDuration = Date.now() - orchStartTime - (synthTotalTokens > 0 ? 0 : 0); // approx
     if (logRowId) {
       pool.query(
-        `UPDATE llm_request_logs SET synthesizer_model = $1, tools_called = $2 WHERE id = $3`,
-        [toolsUsed.length > 0 ? synthModel : null, toolsUsed, logRowId]
+        `UPDATE llm_request_logs SET
+           synthesizer_model = $1, tools_called = $2, data_mode = $3,
+           orchestrator_provider = $4, orch_prompt_tokens = $5, orch_completion_tokens = $6,
+           orch_total_tokens = $7, orch_iterations = $8,
+           synth_provider = $9, synth_prompt_tokens = $10, synth_completion_tokens = $11,
+           synth_total_tokens = $12,
+           total_prompt_tokens = $13, total_completion_tokens = $14, total_tokens = $15,
+           tool_result_chars = $16
+         WHERE id = $17`,
+        [
+          toolsUsed.length > 0 ? synthModel : null, toolsUsed, dataMode,
+          orchestratorModel.startsWith("local/") ? "ollama" : "cloud",
+          orchPromptTokens, orchCompletionTokens, orchTotalTokens, stage1Iteration,
+          synthModel?.startsWith("local/") ? "ollama" : "cloud",
+          synthPromptTokens, synthCompletionTokens, synthTotalTokens,
+          orchPromptTokens + synthPromptTokens,
+          orchCompletionTokens + synthCompletionTokens,
+          orchTotalTokens + synthTotalTokens,
+          totalToolResultLength, logRowId,
+        ]
       ).catch(() => {});
     }
 
@@ -353,8 +461,17 @@ export async function handleLegacyChat(req: Request, res: Response): Promise<voi
     }
 
     await rootSpan.end("ok", {
-      metadata: { toolsUsed, orchestratorModel, synthModel: synthModel ?? null, dataMode },
-      responsePayload: { answerLength: fullAnswer.length },
+      metadata: {
+        toolsUsed,
+        orchestratorModel,
+        orchestratorProvider: orchestratorModel.startsWith("local/") ? "ollama" : "cloud",
+        synthModel: synthModel ?? null,
+        synthProvider: synthModel?.startsWith("local/") ? "ollama" : "cloud",
+        dataMode,
+        stage1Iterations: stage1Iteration,
+        totalToolResultLength,
+      },
+      responsePayload: { answerLength: fullAnswer.length, answerPreview: fullAnswer.slice(0, 300) },
     });
     await trace.complete("completed", { toolCount: toolsUsed.length });
 
@@ -387,6 +504,14 @@ export async function handleSetDataMode(req: Request, res: Response): Promise<vo
     return;
   }
   try {
+    // SEC: Only allow changing data_mode on sessions the user owns
+    const existing = await pool.query(
+      `SELECT user_id FROM chat_sessions WHERE id = $1`, [session_id]
+    );
+    if (existing.rows.length > 0 && (existing.rows[0] as { user_id: string }).user_id !== userId) {
+      res.status(403).json({ error: "Not your session" });
+      return;
+    }
     await pool.query(
       `INSERT INTO chat_sessions (id, user_id, data_mode, updated_at)
        VALUES ($1, $2, $3, NOW())

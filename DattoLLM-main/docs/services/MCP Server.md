@@ -32,6 +32,7 @@ description: The only container with Datto credentials — exposes 37 read-only 
 | `POST /mcp` | JSON-RPC 2.0 tool execution |
 | `GET /health` | Liveness probe |
 | `GET /metrics` | Prometheus counters |
+| `GET /trace-spans` | Returns and drains buffered Datto API call spans (URL, method, status, duration, response size, retry flag). Called by [[MCP Bridge]] for distributed tracing. Requires `X-Internal-Secret` |
 
 ## Security Checks
 

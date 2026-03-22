@@ -1,6 +1,6 @@
 # Datto RMM AI Platform — Second Brain
 
-> **Obsidian Knowledge Graph** | Version 2.5.0 | 2026-03-20
+> **Obsidian Knowledge Graph** | Version 2.6.0 | 2026-03-22
 > Navigate this file like a graph. Every `[[Node]]` is a clickable link to a section or sibling note.
 
 ---
@@ -70,6 +70,7 @@ graph TD
         Redis[("Redis :6379")]
         Etcd["etcd :2379"]
         Zipkin["Zipkin :9411"]
+        Ollama["[[Ollama]]\n:11434"]
     end
 
     Datto["☁️ Datto RMM API\n*.centrastage.net"]
@@ -85,6 +86,7 @@ graph TD
     AI --> Embed
     AI --> Bridge
     AI -->|"LLM calls"| LiteLLM
+    LiteLLM -->|"local/ prefix"| Ollama
     Bridge --> MCP
     MCP --> Datto
     GW --- Etcd
@@ -232,13 +234,14 @@ ngx.req.set_header("X-Allowed-Tools", cjson.encode(pl.allowed_tools or {}))
 | `src/prompt.ts` | [[Prompt Builder]] + `buildSynthesizerPrompt` |
 | `src/llmConfig.ts` | Routing config DB accessor (60s cache) + routing decision functions |
 | `src/modelRouter.ts` | Single `llmClient` (OpenAI SDK via LiteLLM `/v1`), `synthesize()`, `synthesizeStream()` |
-| `src/toolRegistry.ts` | [[Tool Router]] — all 37 tool definitions |
+| `src/toolRegistry.ts` | [[Tool Router]] — all 40 tool definitions (37 MCP + 3 MV-backed fleet) |
 | `src/mcpBridge.ts` | HTTP client to [[MCP Bridge]] |
 | `src/vectorSearch.ts` | pgvector similarity queries |
 | `src/sse.ts` | SSE event writers |
 | `src/db.ts` | pg Pool singleton |
 | `src/sync.ts` | [[Local Data Cache]] sync pipeline — rate-limited MCP calls → upsert cache tables |
-| `src/cachedQueries.ts` | SQL query handlers for all 28 cacheable tools |
+| `src/preQuery.ts` | [[Pre-Query Engine]] — 15 regex patterns match simple questions and answer from materialized views (0 tokens, <100ms) |
+| `src/cachedQueries.ts` | SQL query handlers for all 28 cacheable tools + 3 MV-backed fleet tools |
 | `src/dataBrowser.ts` | [[Data Explorer]] REST handlers — read-only SQL queries against cache tables for the admin browser UI |
 | `src/observability.ts` | [[Observability Dashboard]] — 6 admin endpoints aggregating metrics from audit_logs, llm_request_logs, chat_messages, chat_sessions, datto_sync_log |
 | `src/permissions.ts` | SEC-Cache-001: Tool permission check + audit-log utility for cached and live paths |
@@ -287,7 +290,7 @@ The bridge does NOT trust the `allowedTools` array supplied by the AI container 
 
 ## [[MCP Server]]
 
-**Purpose:** The **only** container with Datto credentials. Exposes 37 read-only tools over HTTP using MCP `StreamableHTTPServerTransport`. Manages Datto OAuth token cache.
+**Purpose:** The **only** container with Datto credentials. Exposes 37 read-only MCP tools over HTTP using MCP `StreamableHTTPServerTransport`. Manages Datto OAuth token cache. (3 additional MV-backed fleet tools are served directly by [[AI Service]] from materialized views.)
 
 **Build:** `./read-only-mcp`
 **Port:** `3001` (internal only)
@@ -313,7 +316,7 @@ The bridge does NOT trust the `allowedTools` array supplied by the AI container 
 - Refreshes 5 minutes before expiry
 - On 401 from Datto: invalidate + fetch + retry once
 
-**37 tool groups:**
+**37 MCP tool groups:**
 - Account (4) · Sites (7) · Devices (9) · Alerts (5) · Jobs (5) · Audit (4) · Activity (1) · Filters (2)
 
 **Related nodes:** [[MCP Bridge]] · [[Token Manager]] · [[Tool Execution Flow]] · [[Datto Credential Isolation]] · [[Network Isolation]]
@@ -460,7 +463,7 @@ Phone (SIP app on WiFi) → Asterisk PBX (SIP:5060, Docker)
 
 ## [[LiteLLM Gateway]]
 
-**Purpose:** Internal-only LLM proxy. Routes calls to Anthropic, DeepSeek, and Gemini without changing any application code. Enables admin-panel model swaps.
+**Purpose:** Internal-only LLM proxy. Routes calls to Anthropic, DeepSeek, Gemini, and local [[Ollama]] models without changing any application code. Enables admin-panel model swaps.
 
 **Image:** `ghcr.io/berriai/litellm:v1.82.3-stable`
 **Port:** `4000` (internal only)
@@ -469,14 +472,81 @@ Phone (SIP app on WiFi) → Asterisk PBX (SIP:5060, Docker)
 
 **Routing:**
 - `/anthropic` — Anthropic passthrough; preserves tool_use streaming format used by Anthropic SDK
-- `/v1` — OpenAI-compatible endpoint used for DeepSeek and Gemini synthesizers
+- `/v1` — OpenAI-compatible endpoint used for DeepSeek, Gemini, and local Ollama synthesizers
+- `local/*` prefixed model names → routed to [[Ollama]] at `http://ollama:11434` (e.g. `local/qwen3-1.7b` → `ollama_chat/qwen3:1.7b`)
 
 **Called by:** [[AI Service]] `modelRouter.ts` (via `LITELLM_URL` env var)
-**Calls:** Anthropic API, DeepSeek API, Gemini API
+**Calls:** Anthropic API, DeepSeek API, Gemini API, [[Ollama]] (internal)
 
 > If `LITELLM_URL` is not set in ai-service, the Anthropic SDK falls back to direct `api.anthropic.com`. Non-Anthropic synthesizers are unavailable in that mode.
 
-**Related nodes:** [[AI Service]] · [[Chat Request Flow]]
+**Related nodes:** [[AI Service]] · [[Ollama]] · [[Chat Request Flow]]
+
+---
+
+## [[Ollama]]
+
+**Purpose:** Local LLM runtime for cost-free synthesis and embeddings. Runs `qwen3:1.7b` for Stage 2 synthesis and `nomic-embed-text` for local embeddings. Internal network only — no port exposure, no external access.
+
+**Image:** `ollama/ollama:latest`
+**Port:** `11434` (internal only)
+**Volume:** `ollama_data` (persists pulled models across restarts)
+**Networks:** `internal` only
+
+**Models:**
+
+| Model | Size | Purpose |
+|---|---|---|
+| `qwen3:1.7b` | ~1.4 GB | Stage 2 synthesizer — fast, zero-cost response generation |
+| `nomic-embed-text` | ~0.3 GB | Local embeddings (768 dims) — future replacement for Voyage |
+
+**Integration:**
+- LiteLLM routes `local/*` prefixed model names to Ollama at `http://ollama:11434`
+- `modelRouter.ts` detects local models via `isLocalModel()` (checks `local/` prefix) and passes `extra_body: { think: false }` to disable Qwen3's default thinking mode (which puts output in `reasoning_content` instead of `content`)
+- Routing config: `synthesizer_default` or `synthesizer_cached` can be set to `local/qwen3-1.7b` in the admin panel
+
+**First start:**
+```bash
+docker compose exec ollama ollama pull qwen3:1.7b
+docker compose exec ollama ollama pull nomic-embed-text
+```
+
+**Related nodes:** [[LiteLLM Gateway]] · [[AI Service]] · [[Chat Request Flow]]
+
+---
+
+## [[Pre-Query Engine]]
+
+**Purpose:** Intercepts simple questions and answers them directly from materialized views, bypassing the LLM entirely. Zero tokens consumed, sub-100ms response time.
+
+**File:** `ai-service/src/preQuery.ts`
+
+**How it works:**
+1. User message is tested against 15 regex patterns (case-insensitive)
+2. If a pattern matches, the required tool permission is checked against `allowedTools` (RBAC respected)
+3. A direct SQL query runs against a materialized view (`mv_fleet_status`, `mv_site_summary`, or `mv_critical_alerts`)
+4. A formatted markdown answer is returned immediately — no LLM call, no MCP call, no token cost
+5. All pre-query hits are logged to `audit_logs` and tracked in `llm_request_logs` (`prequery_hit = true`, `prequery_tool = <tool>`)
+
+**15 patterns cover:**
+- Fleet overview / summary / status questions
+- Device count questions (total, online, offline)
+- Site count questions
+- Alert count / critical alert questions
+- Site comparison questions ("which site has the most...")
+
+**Materialized views** (migration `db/025_materialized_views.sql`):
+
+| View | Rows | Content |
+|---|---|---|
+| `mv_fleet_status` | 1 | Total devices, online/offline, sites, alerts, last sync times |
+| `mv_site_summary` | 1 per site | Per-site device counts, alert counts |
+| `mv_critical_alerts` | Up to 20 | Top priority open alerts with device/site info |
+| `mv_os_distribution` | 1 per OS | OS breakdown with percentages |
+
+Views are refreshed concurrently after each data sync.
+
+**Related nodes:** [[AI Service]] · [[Local Data Cache]] · [[Tool Router]]
 
 ---
 
@@ -504,7 +574,10 @@ Phone (SIP app on WiFi) → Asterisk PBX (SIP:5060, Docker)
 | `cached` (default) | AI queries `datto_cache_*` tables — fast, no Datto API call |
 | `live` | AI calls Datto API via MCP Bridge in real time |
 
-**Stored per session** in `chat_sessions.data_mode`. Toggled via `POST /api/chat/mode`.
+**Data mode priority** (highest wins):
+1. Request body `data_mode` field — per-request override
+2. Session DB value `chat_sessions.data_mode` — set by `POST /api/chat/mode`
+3. Global default from `llm_routing_config` (`default_data_mode` key)
 
 **Always-live tools** (never cached): `get-job*`, `get-job-*`, `get-activity-logs`, `get-system-status`, `get-rate-limit`, `get-pagination-config`
 
@@ -546,7 +619,7 @@ Phone (SIP app on WiFi) → Asterisk PBX (SIP:5060, Docker)
 
 **Stage 2 context compression (SEC-015b):**
 - `compressForSynthesizer()` truncates large tool results before sending to Stage 2
-- Tool results > 12K chars are truncated; total context capped at ~120K chars
+- Tool results > 8K chars are truncated; total context capped at ~120K chars
 - Stage 1 always sees full data for accurate tool chaining; only Stage 2 is compressed
 - Wired into both `chat.ts` (SSE streaming) and `legacyChat.ts` (sync JSON) synthesizer calls
 
@@ -637,7 +710,7 @@ sequenceDiagram
   "email": "admin@example.com",
   "role": "admin",
   "roles": ["admin"],
-  "allowed_tools": ["get-account", "list-sites", "...37 total"]
+  "allowed_tools": ["get-account", "list-sites", "get-fleet-status", "...40 total"]
 }
 ```
 
@@ -778,7 +851,7 @@ sequenceDiagram
 - `auth-service/src/handlers.ts` — query + embed into JWT
 - `mcp-bridge/src/validate.ts` — runtime gate
 - `ai-service/src/legacyChat.ts` + `chat.ts` — prompt filter
-- `ai-service/src/toolRegistry.ts` — source of all 37 definitions
+- `ai-service/src/toolRegistry.ts` — source of all 40 definitions (37 MCP + 3 fleet)
 
 **Flow:**
 ```mermaid
@@ -798,7 +871,7 @@ flowchart LR
 **Default role mappings:**
 
 ```
-admin    → all 37 tools
+admin    → all 40 tools (37 MCP + 3 fleet)
 analyst  → list-devices, get-device, list-sites, get-site,
            list-open-alerts, list-resolved-alerts, get-alert,
            get-job, get-activity-logs  (9 tools)
@@ -817,7 +890,7 @@ readonly → list-sites, get-system-status,
 
 ## [[Tool Router]]
 
-**Purpose:** Registry of all 37 MCP tool definitions used by [[AI Service]] to build Anthropic tool call schemas. Only tools matching `allowed_tools` are passed to the LLM.
+**Purpose:** Registry of all 40 tool definitions (37 MCP + 3 MV-backed fleet) used by [[AI Service]] to build tool call schemas. Only tools matching `allowed_tools` are passed to the LLM.
 
 **Files (ARCH-002 — domain split):**
 - `ai-service/src/toolRegistry.ts` — thin re-export shim; all existing imports continue working unchanged
@@ -832,6 +905,7 @@ readonly → list-sites, get-system-status,
 - `ai-service/src/tools/activity.ts` — 1 activity tool
 - `ai-service/src/tools/filters.ts` — 2 filter tools
 - `ai-service/src/tools/system.ts` — 3 system tools
+- `ai-service/src/tools/fleet.ts` — 3 MV-backed fleet tools (Stage 3)
 
 **Structure per tool:**
 ```typescript
@@ -842,10 +916,11 @@ readonly → list-sites, get-system-status,
 }
 ```
 
-**Tool groups (37 total):**
+**Tool groups (40 total):**
 
 | Group | File | Count | Examples |
 |---|---|---|---|
+| Fleet (MV) | `tools/fleet.ts` | 3 | `get-fleet-status`, `list-site-summaries`, `list-critical-alerts` — backed by materialized views, instant answers |
 | Account | `tools/account.ts` | 8 | `get-account`, `list-users`, `list-account-variables`, `list-components`, `list-sites` (account-level), `list-devices` (account-level), `list-open-alerts` (account-level) |
 | Sites | `tools/sites.ts` | 7 | `list-sites`, `get-site`, `list-site-devices`, `list-site-open-alerts`, ... |
 | Devices | `tools/devices.ts` | 5 | `get-device`, `list-devices`, `get-device-by-id`, `get-device-by-mac`, `get-device-audit` |
@@ -905,13 +980,14 @@ readonly → list-sites, get-system-status,
 
 > **Full schema reference:** See `DATABASE.md` — every table, column, index, FK, and design decision documented in one place.
 
-**33 tables across 4 domains:**
+**33 tables + 4 materialized views across 4 domains:**
 - **Auth:** `users`, `roles`, `user_roles`, `tool_permissions`, `tool_policies`, `user_tool_overrides`, `refresh_tokens`, `audit_logs`, `approvals`
-- **Chat & LLM:** `chat_sessions`, `chat_messages`, `llm_request_logs`, `llm_routing_config`
+- **Chat & LLM:** `chat_sessions`, `chat_messages`, `llm_request_logs` (16 per-stage token columns), `llm_routing_config`
 - **Datto Cache:** `datto_sync_log` + 14 `datto_cache_*` tables
+- **Materialized Views:** `mv_fleet_status`, `mv_site_summary`, `mv_critical_alerts`, `mv_os_distribution`
 - **CVE Scanner:** `cve_database`, `cpe_dictionary`, `device_vulnerabilities`, `cve_sync_log`
 
-**Migrations:** `db/001_extensions.sql` → `db/018_fuzzy_search.sql` (18 numbered migrations + `seed.sql`)
+**Migrations:** `db/001_extensions.sql` → `db/026_llm_token_tracking.sql` (26 numbered migrations + `seed.sql`)
 
 | Migration | Purpose |
 |---|---|
@@ -927,6 +1003,8 @@ readonly → list-sites, get-system-status,
 | 019_voice_device_mappings | SIP extension → DattoLLM user mapping table for [[Voice Gateway]] |
 | 020_voice_routing_config | `synthesizer_voice` routing slot in `llm_routing_config` |
 | 022_cve_scanner | CVE scanner tables: `cve_database`, `cpe_dictionary`, `device_vulnerabilities`, `cve_sync_log` |
+| 025_materialized_views | Materialized views: `mv_fleet_status`, `mv_site_summary`, `mv_critical_alerts`, `mv_os_distribution` — pre-computed summaries for [[Pre-Query Engine]] and fleet tools |
+| 026_llm_token_tracking | 16 new columns on `llm_request_logs` for per-stage token tracking (orch/synth prompt/completion/total tokens, provider, duration, data_mode, prequery_hit) |
 
 **Seed:** `db/seed.sql` (4 default users, 4 roles, tool assignments, `tool_policies`, `llm_request_logs`)
 
@@ -1302,6 +1380,9 @@ Sensitive fields (passwords, API keys, secrets) are replaced with `***` in `tool
 - Time-series buckets use `DATE_TRUNC('hour', created_at)` for 24h views
 - Overview page shows 6 stat cards with sparklines + 5 clickable drill-down cards
 - Each sub-page: breadcrumb nav, summary cards, SVG charts, data table
+- LLM page: clickable rows open a detail panel with Messages / Tools / System tabs showing full request trace
+- Enhanced tracing: spans show CACHED vs LIVE→MCP source, model name, provider, per-stage token counts, answer previews
+- Token tracking: `llm_request_logs` has 16 per-stage columns (orch/synth prompt/completion/total tokens, provider, duration, data_mode, prequery_hit)
 - No heavy scans — all queries hit dedicated `obs_*` indexes from migration 014
 - Data sourced from existing tables: `audit_logs`, `llm_request_logs`, `chat_messages`, `chat_sessions`, `datto_sync_log`, `datto_cache_*`
 
@@ -1329,6 +1410,7 @@ Sensitive fields (passwords, API keys, secrets) are replaced with `***` in `tool
 | etcd | 2379 | Internal |
 | [[Voice Gateway]] | 8001/8002 | Internal |
 | [[CVE Scanner]] | 8500 | Internal |
+| [[Ollama]] | 11434 | Internal |
 | Asterisk PBX | 5060, 10000-10100 | Internal (SIP + RTP) |
 | Drachtio | 5070 | Internal (SIP signaling) |
 | FreeSWITCH | 5080, 30000-30100 | Internal (RTP) |
@@ -1450,14 +1532,21 @@ Complete reference for configuring the two-stage LLM pipeline — what each piec
 Every chat request runs through two stages:
 
 ```
+Stage 0 — Pre-Query (regex + materialized views)
+  Tests: 15 patterns against user message
+  If matched: answers from mv_fleet_status / mv_site_summary / mv_critical_alerts
+  Cost: 0 tokens, <100ms
+  If no match: proceeds to Stage 1
+
 Stage 1 — Orchestrator (MUST be claude-*)
   Receives: user question + tool definitions
   Does: calls MCP tools in a loop until it has all the data
   Sends to Stage 2: the full conversation with all tool results embedded
 
-Stage 2 — Synthesizer (any model)
+Stage 2 — Synthesizer (any model, including local Ollama)
   Receives: full conversation including all tool results
   Does: reads the data, writes a clean answer
+  Default: local/qwen3-1.7b (Ollama, zero cost) for cached-mode queries
   Sends to user: the final response (streamed or JSON)
 
   ↑ Stage 2 is SKIPPED entirely if Stage 1 called zero tools.
@@ -1467,7 +1556,7 @@ Stage 2 — Synthesizer (any model)
 **Why two stages?**
 Stage 1 only needs to understand tool schemas and decide what to call. A cheap fast model (Haiku) handles this well. Stage 2 reads potentially large data dumps and writes prose — a better model or a cheap local LLM works here. Splitting saves cost without sacrificing quality.
 
-**Important implementation detail:** Both stages use the **OpenAI SDK** (`llmClient`) via LiteLLM's `/v1/chat/completions` endpoint — not the Anthropic SDK. Claude models route through LiteLLM → OpenRouter using OpenRouter model IDs with dot notation (e.g. `anthropic/claude-haiku-4.5`). LiteLLM handles format translation internally. Tool calls use OpenAI format (`tool_calls` array + `role: "tool"` messages) throughout.
+**Important implementation detail:** Both stages use the **OpenAI SDK** (`llmClient`) via LiteLLM's `/v1/chat/completions` endpoint — not the Anthropic SDK. Claude models route through LiteLLM → OpenRouter using OpenRouter model IDs with dot notation (e.g. `anthropic/claude-haiku-4.5`). Local models (prefix `local/`) route through LiteLLM → [[Ollama]] on the internal network. `modelRouter.ts` detects local models and passes `extra_body: { think: false }` to disable Qwen3's thinking mode. LiteLLM handles format translation internally. Tool calls use OpenAI format (`tool_calls` array + `role: "tool"` messages) throughout.
 
 ---
 
@@ -1499,12 +1588,12 @@ SELECT key, model FROM llm_routing_config;
 
 -- key                    | model
 -- -----------------------+-----------------------------
--- orchestrator_default   | claude-haiku-4-5-20251001   ← Stage 1 normal requests
--- orchestrator_high_risk | claude-opus-4-6             ← Stage 1 when risky tools in scope
--- synthesizer_default    | claude-haiku-4-5-20251001   ← Stage 2 fallback
+-- orchestrator_default   | claude-haiku-4-5-20251001   ← Stage 1 normal requests (cloud)
+-- orchestrator_high_risk | claude-opus-4-6             ← Stage 1 when risky tools in scope (cloud)
+-- synthesizer_default    | local/qwen3-1.7b            ← Stage 2 fallback (Ollama, zero cost)
 -- synthesizer_large_data | deepseek/deepseek-r1        ← Stage 2 when results > 8 000 chars
--- synthesizer_high_risk  | claude-opus-4-6             ← Stage 2 when any high-risk tool is in scope
--- synthesizer_cached     | claude-haiku-4-5-20251001   ← Stage 2 for cached-mode queries
+-- synthesizer_high_risk  | claude-opus-4-6             ← Stage 2 when any high-risk tool is in scope (cloud)
+-- synthesizer_cached     | local/qwen3-1.7b            ← Stage 2 for cached-mode queries (Ollama, zero cost)
 -- default_data_mode      | cached                      ← default for new sessions
 ```
 
@@ -1687,11 +1776,11 @@ curl -X PUT http://localhost:6001/api/admin/llm-config \
 
 All nodes in this knowledge graph:
 
-**Services:** [[API Gateway]] · [[Auth Service]] · [[AI Service]] · [[LiteLLM Gateway]] · [[MCP Bridge]] · [[MCP Server]] · [[Embedding Service]] · [[Voice Gateway]] · [[CVE Scanner]] · [[Web App]] · [[Local Data Cache]]
+**Services:** [[API Gateway]] · [[Auth Service]] · [[AI Service]] · [[LiteLLM Gateway]] · [[Ollama]] · [[MCP Bridge]] · [[MCP Server]] · [[Embedding Service]] · [[Voice Gateway]] · [[CVE Scanner]] · [[Web App]] · [[Local Data Cache]]
 
 **Flows:** [[Authentication Flow]] · [[Chat Request Flow]] · [[Tool Execution Flow]]
 
-**Modules:** [[Token Manager]] · [[RBAC System]] · [[Tool Router]] · [[Prompt Builder]] · [[Data Explorer]] · [[Observability Dashboard]]
+**Modules:** [[Token Manager]] · [[RBAC System]] · [[Tool Router]] · [[Prompt Builder]] · [[Pre-Query Engine]] · [[Data Explorer]] · [[Observability Dashboard]]
 
 **Database:** [[PostgreSQL]] · [[Users Table]] · [[Roles Table]] · [[Tool Permissions Table]] · [[Chat Messages Table]] · `DATABASE.md` (full schema reference)
 

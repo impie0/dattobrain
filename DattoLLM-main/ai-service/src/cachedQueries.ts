@@ -9,6 +9,9 @@ import type { Pool } from "pg";
 const CACHED_NOTE = (syncedAt: string | null) =>
   `\n\n[Data from local cache — last synced: ${syncedAt ?? "unknown"}]`;
 
+/** Stage 2: Hard cap on tool result size — prevents context overflow from large results */
+const MAX_RESULT_CHARS = 8_000;
+
 // SEC-012: Alert data is time-critical. Warn the LLM when alert cache is > 30 minutes old
 // so it can communicate staleness to the user rather than presenting stale data as current.
 const ALERT_CACHED_NOTE = (syncedAt: string | null): string => {
@@ -106,17 +109,21 @@ export async function cachedListSites(db: Pool, args: Record<string, unknown>): 
     }) + CACHED_NOTE(null) + `\n[No sites matching "${siteName}" found]`;
   }
 
-  // No filter — existing pagination-only path (unchanged)
+  // No filter — return compact list with counts (Stage 2: keep under 8K)
   const r = await db.query(
-    `SELECT data, synced_at FROM datto_cache_sites ORDER BY name LIMIT $1 OFFSET $2`,
-    [pageSize, offset]
+    `SELECT s.uid, s.name, s.synced_at,
+            (SELECT COUNT(*) FROM datto_cache_devices d WHERE d.site_uid = s.uid) AS device_count,
+            (SELECT COUNT(*) FILTER (WHERE d.online) FROM datto_cache_devices d WHERE d.site_uid = s.uid) AS online_count
+     FROM datto_cache_sites s ORDER BY s.name`
   );
-  const total = await db.query(`SELECT COUNT(*) FROM datto_cache_sites`);
-  const totalCount = Number((total.rows[0] as { count: string }).count);
+  const total = r.rowCount ?? 0;
   const synced = latestSync(r.rows as { synced_at: Date }[]);
   const result = {
-    sites: r.rows.map((row: { data: unknown }) => row.data),
-    pageDetails: { page, pageSize, count: r.rowCount, totalCount, totalPages: Math.ceil(totalCount / pageSize) },
+    totalSites: total,
+    sites: r.rows.map((row: { uid: string; name: string; device_count: string; online_count: string }) => ({
+      uid: row.uid, name: row.name,
+      devices: Number(row.device_count), online: Number(row.online_count),
+    })),
   };
   return JSON.stringify(result) + CACHED_NOTE(synced);
 }
@@ -150,33 +157,58 @@ export async function cachedGetSiteVariables(db: Pool, args: Record<string, unkn
 }
 
 export async function cachedListSiteDevices(db: Pool, args: Record<string, unknown>): Promise<string> {
+  const total = await db.query(`SELECT COUNT(*)::int AS count FROM datto_cache_devices WHERE site_uid = $1`, [args["siteUid"]]);
+  const totalCount = Number((total.rows[0] as { count: number }).count);
+
+  const DISPLAY_LIMIT = 10;
   const r = await db.query(
-    `SELECT data, synced_at FROM datto_cache_devices WHERE site_uid = $1 ORDER BY hostname`,
+    `SELECT data, synced_at FROM datto_cache_devices WHERE site_uid = $1 ORDER BY hostname LIMIT ${DISPLAY_LIMIT}`,
     [args["siteUid"]]
   );
   const synced = latestSync(r.rows as { synced_at: Date }[]);
-  return JSON.stringify({ devices: r.rows.map((row: { data: unknown }) => row.data), count: r.rowCount }) + CACHED_NOTE(synced);
+  // Put totalCount FIRST so it survives any truncation
+  const result: Record<string, unknown> = {
+    totalDevices: totalCount,
+    showing: Math.min(DISPLAY_LIMIT, totalCount),
+    devices: r.rows.map((row: { data: unknown }) => row.data),
+  };
+  if (totalCount > DISPLAY_LIMIT) {
+    result.hint = `Showing ${DISPLAY_LIMIT} of ${totalCount} devices at this site. Use list-devices with hostname filter for specific devices.`;
+  }
+  return JSON.stringify(result) + CACHED_NOTE(synced);
 }
 
 export async function cachedListSiteOpenAlerts(db: Pool, args: Record<string, unknown>): Promise<string> {
+  const total = await db.query(
+    `SELECT COUNT(*)::int AS count FROM datto_cache_alerts WHERE site_uid = $1 AND resolved = false`,
+    [args["siteUid"]]
+  );
+  const totalCount = Number((total.rows[0] as { count: number }).count);
+
+  const DISPLAY_LIMIT = 5;
   const r = await db.query(
-    `SELECT data, synced_at FROM datto_cache_alerts WHERE site_uid = $1 AND resolved = false ORDER BY alert_timestamp DESC`,
+    `SELECT data, synced_at FROM datto_cache_alerts WHERE site_uid = $1 AND resolved = false ORDER BY alert_timestamp DESC LIMIT ${DISPLAY_LIMIT}`,
     [args["siteUid"]]
   );
   const synced = latestSync(r.rows as { synced_at: Date }[]);
-  return JSON.stringify({ alerts: r.rows.map((row: { data: unknown }) => row.data), count: r.rowCount }) + ALERT_CACHED_NOTE(synced);
+  // Put totalCount FIRST so it survives any truncation
+  const result: Record<string, unknown> = {
+    totalOpenAlerts: totalCount,
+    showing: Math.min(DISPLAY_LIMIT, totalCount),
+    alerts: r.rows.map((row: { data: unknown }) => row.data),
+  };
+  if (totalCount > DISPLAY_LIMIT) {
+    result.hint = `Showing ${DISPLAY_LIMIT} most recent of ${totalCount} open alerts at this site. Use list-device-open-alerts with a deviceUid for device-level alerts.`;
+  }
+  return JSON.stringify(result) + ALERT_CACHED_NOTE(synced);
 }
 
 // ── Devices ────────────────────────────────────────────────────────────────
 
 export async function cachedListDevices(db: Pool, args: Record<string, unknown>): Promise<string> {
-  const page = Number(args["page"] ?? 1);
-  const pageSize = Number(args["pageSize"] ?? 50);
-  const offset = (page - 1) * pageSize;
-
   const conditions: string[] = [];
-  const params: unknown[] = [pageSize, offset];
-  let pi = 3;
+  const params: unknown[] = [];
+  let pi = 1;
 
   if (args["siteUid"]) { conditions.push(`site_uid = $${pi++}`); params.push(args["siteUid"]); }
   if (args["hostname"]) { conditions.push(`hostname ILIKE $${pi++}`); params.push(`%${args["hostname"]}%`); }
@@ -184,22 +216,52 @@ export async function cachedListDevices(db: Pool, args: Record<string, unknown>)
   if (args["deviceClass"]) { conditions.push(`device_class = $${pi++}`); params.push(args["deviceClass"]); }
   if (args["operatingSystem"]) { conditions.push(`operating_system ILIKE $${pi++}`); params.push(`%${args["operatingSystem"]}%`); }
   if (args["siteName"]) {
-    // ILIKE substring OR pg_trgm fuzzy match — handles typos in site names
     const siteNameVal = String(args["siteName"]);
     conditions.push(`(site_name ILIKE $${pi} OR similarity(site_name, $${pi + 1}) > 0.2)`);
     params.push(`%${siteNameVal}%`, siteNameVal);
     pi += 2;
   }
 
-  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-  const r = await db.query(`SELECT data, synced_at FROM datto_cache_devices ${where} ORDER BY hostname LIMIT $1 OFFSET $2`, params);
-  const totalQ = await db.query(`SELECT COUNT(*) FROM datto_cache_devices ${where}`, params.slice(2));
+  // Stage 2b: Block unfiltered list calls — prevents 150K+ token dumps
+  if (conditions.length === 0) {
+    const totals = await db.query(`
+      SELECT COUNT(*) AS total,
+             COUNT(*) FILTER (WHERE online) AS online,
+             COUNT(*) FILTER (WHERE NOT online) AS offline
+      FROM datto_cache_devices`);
+    const t = totals.rows[0] as { total: string; online: string; offline: string };
+    const osFacets = await db.query(`
+      SELECT operating_system AS os, COUNT(*)::int AS count
+      FROM datto_cache_devices GROUP BY operating_system ORDER BY count DESC LIMIT 8`);
+    const synced = latestSync((await db.query(`SELECT synced_at FROM datto_cache_devices LIMIT 1`)).rows as { synced_at: Date }[]);
+    return JSON.stringify({
+      summary: { total: Number(t.total), online: Number(t.online), offline: Number(t.offline) },
+      osFacets: osFacets.rows,
+      hint: "Use filters to get device details: hostname, siteName, operatingSystem, deviceClass, or online (true/false). Example: list-devices with hostname='SERVER' or siteName='Main Office'.",
+    }) + CACHED_NOTE(synced);
+  }
+
+  const where = `WHERE ${conditions.join(" AND ")}`;
+  const totalQ = await db.query(`SELECT COUNT(*) FROM datto_cache_devices ${where}`, params);
   const totalCount = Number((totalQ.rows[0] as { count: string }).count);
+
+  // Stage 2a: Cap at 15 results — return facets for the rest
+  const DISPLAY_LIMIT = 15;
+  const r = await db.query(
+    `SELECT data, synced_at FROM datto_cache_devices ${where} ORDER BY hostname LIMIT ${DISPLAY_LIMIT}`,
+    params
+  );
   const synced = latestSync(r.rows as { synced_at: Date }[]);
-  return JSON.stringify({
+  // Put totalCount FIRST so it survives any truncation
+  const result: Record<string, unknown> = {
+    totalMatchingDevices: totalCount,
+    showing: Math.min(DISPLAY_LIMIT, totalCount),
     devices: r.rows.map((row: { data: unknown }) => row.data),
-    pageDetails: { page, pageSize, count: r.rowCount, totalCount, totalPages: Math.ceil(totalCount / pageSize) },
-  }) + CACHED_NOTE(synced);
+  };
+  if (totalCount > DISPLAY_LIMIT) {
+    result.hint = `Showing ${DISPLAY_LIMIT} of ${totalCount} matching devices. Add more filters (hostname, siteName, operatingSystem) to narrow results.`;
+  }
+  return JSON.stringify(result) + CACHED_NOTE(synced);
 }
 
 export async function cachedGetDevice(db: Pool, args: Record<string, unknown>): Promise<string> {
@@ -239,12 +301,24 @@ export async function cachedGetDeviceAuditByMac(db: Pool, args: Record<string, u
 }
 
 export async function cachedGetDeviceSoftware(db: Pool, args: Record<string, unknown>): Promise<string> {
+  const total = await db.query(
+    `SELECT COUNT(*)::int AS count FROM datto_cache_device_software WHERE device_uid = $1`,
+    [args["deviceUid"]]
+  );
+  const totalCount = Number((total.rows[0] as { count: number }).count);
+
+  // Stage 2a: Cap at 25 entries — most devices have 50-200 installed apps
+  const DISPLAY_LIMIT = 25;
   const r = await db.query(
-    `SELECT name, version, publisher, install_date, synced_at FROM datto_cache_device_software WHERE device_uid = $1 ORDER BY name`,
+    `SELECT name, version, publisher, install_date, synced_at FROM datto_cache_device_software WHERE device_uid = $1 ORDER BY name LIMIT ${DISPLAY_LIMIT}`,
     [args["deviceUid"]]
   );
   const synced = latestSync(r.rows as { synced_at: Date }[]);
-  return JSON.stringify({ software: r.rows, count: r.rowCount }) + CACHED_NOTE(synced);
+  const result: Record<string, unknown> = { software: r.rows, totalCount, showing: Math.min(DISPLAY_LIMIT, totalCount) };
+  if (totalCount > DISPLAY_LIMIT) {
+    result.hint = `Showing first ${DISPLAY_LIMIT} of ${totalCount} installed applications (alphabetical). The full list is available in the admin data browser.`;
+  }
+  return JSON.stringify(result) + CACHED_NOTE(synced);
 }
 
 export async function cachedGetEsxiAudit(db: Pool, args: Record<string, unknown>): Promise<string> {
@@ -264,37 +338,51 @@ export async function cachedGetPrinterAudit(db: Pool, args: Record<string, unkno
 // ── Alerts ─────────────────────────────────────────────────────────────────
 
 export async function cachedListOpenAlerts(db: Pool, args: Record<string, unknown>): Promise<string> {
-  const page = Number(args["page"] ?? 1);
-  const pageSize = Number(args["pageSize"] ?? 50);
-  const offset = (page - 1) * pageSize;
-  const r = await db.query(
-    `SELECT data, synced_at FROM datto_cache_alerts WHERE resolved = false ORDER BY alert_timestamp DESC LIMIT $1 OFFSET $2`,
-    [pageSize, offset]
-  );
+  // Stage 2b: Return summary + top alerts instead of full dump
+  const facets = await db.query(`
+    SELECT priority, COUNT(*)::int AS count
+    FROM datto_cache_alerts WHERE resolved = false
+    GROUP BY priority ORDER BY count DESC`);
   const total = await db.query(`SELECT COUNT(*) FROM datto_cache_alerts WHERE resolved = false`);
   const totalCount = Number((total.rows[0] as { count: string }).count);
+
+  // Stage 2a: Return top 5 most recent alerts + facets (keep well under 8K cap)
+  const DISPLAY_LIMIT = 5;
+  const r = await db.query(
+    `SELECT data, synced_at FROM datto_cache_alerts WHERE resolved = false ORDER BY alert_timestamp DESC LIMIT ${DISPLAY_LIMIT}`
+  );
   const synced = latestSync(r.rows as { synced_at: Date }[]);
-  return JSON.stringify({
+  // Put summary fields FIRST so they survive any truncation
+  const result: Record<string, unknown> = {
+    totalOpenAlerts: totalCount,
+    showing: Math.min(DISPLAY_LIMIT, totalCount),
+    priorityBreakdown: facets.rows,
     alerts: r.rows.map((row: { data: unknown }) => row.data),
-    pageDetails: { page, pageSize, count: r.rowCount, totalCount, totalPages: Math.ceil(totalCount / pageSize) },
-  }) + ALERT_CACHED_NOTE(synced);
+  };
+  if (totalCount > DISPLAY_LIMIT) {
+    result.hint = `Showing ${DISPLAY_LIMIT} most recent of ${totalCount} open alerts. Use list-site-open-alerts with a siteUid, or list-device-open-alerts with a deviceUid, to see alerts for a specific scope.`;
+  }
+  return JSON.stringify(result) + ALERT_CACHED_NOTE(synced);
 }
 
 export async function cachedListResolvedAlerts(db: Pool, args: Record<string, unknown>): Promise<string> {
-  const page = Number(args["page"] ?? 1);
-  const pageSize = Number(args["pageSize"] ?? 50);
-  const offset = (page - 1) * pageSize;
-  const r = await db.query(
-    `SELECT data, synced_at FROM datto_cache_alerts WHERE resolved = true ORDER BY resolved_at DESC LIMIT $1 OFFSET $2`,
-    [pageSize, offset]
-  );
   const total = await db.query(`SELECT COUNT(*) FROM datto_cache_alerts WHERE resolved = true`);
   const totalCount = Number((total.rows[0] as { count: string }).count);
+
+  const DISPLAY_LIMIT = 5;
+  const r = await db.query(
+    `SELECT data, synced_at FROM datto_cache_alerts WHERE resolved = true ORDER BY resolved_at DESC LIMIT ${DISPLAY_LIMIT}`
+  );
   const synced = latestSync(r.rows as { synced_at: Date }[]);
-  return JSON.stringify({
+  const result: Record<string, unknown> = {
+    totalResolvedAlerts: totalCount,
+    showing: Math.min(DISPLAY_LIMIT, totalCount),
     alerts: r.rows.map((row: { data: unknown }) => row.data),
-    pageDetails: { page, pageSize, count: r.rowCount, totalCount, totalPages: Math.ceil(totalCount / pageSize) },
-  }) + ALERT_CACHED_NOTE(synced);
+  };
+  if (totalCount > DISPLAY_LIMIT) {
+    result.hint = `Showing ${DISPLAY_LIMIT} most recently resolved of ${totalCount} total. Use list-site-resolved-alerts with a siteUid for site-scoped results.`;
+  }
+  return JSON.stringify(result) + ALERT_CACHED_NOTE(synced);
 }
 
 export async function cachedGetAlert(db: Pool, args: Record<string, unknown>): Promise<string> {
@@ -302,6 +390,68 @@ export async function cachedGetAlert(db: Pool, args: Record<string, unknown>): P
   if (!r.rows.length) return JSON.stringify({ error: `Alert ${args["alertUid"]} not found in cache` });
   const row = r.rows[0] as { data: unknown; synced_at: Date };
   return JSON.stringify(row.data) + ALERT_CACHED_NOTE(new Date(row.synced_at).toISOString());
+}
+
+// ── Materialized View tools (Stage 3) ─────────────────────────────────────
+
+export async function cachedGetFleetStatus(db: Pool): Promise<string> {
+  const r = await db.query(`SELECT * FROM mv_fleet_status LIMIT 1`);
+  if (!r.rows.length) return JSON.stringify({ error: "Fleet status not available. Run a sync first." });
+  const row = r.rows[0] as Record<string, unknown>;
+  return JSON.stringify({
+    totalDevices: row.total_devices,
+    onlineDevices: row.online_devices,
+    offlineDevices: row.offline_devices,
+    totalSites: row.total_sites,
+    openAlerts: row.open_alerts,
+    resolvedAlerts: row.resolved_alerts,
+    auditedDevices: row.audited_devices,
+    totalSoftwareInstalls: row.total_software_installs,
+    lastDeviceSync: row.last_device_sync,
+    lastAlertSync: row.last_alert_sync,
+    dataRefreshedAt: row.refreshed_at,
+  });
+}
+
+export async function cachedListSiteSummaries(db: Pool): Promise<string> {
+  const total = await db.query(`SELECT COUNT(*)::int AS count FROM mv_site_summary`);
+  // Return compact rows — uid:name:devices:online:alerts — fits all 89 sites under 5K
+  const r = await db.query(
+    `SELECT site_uid, site_name, device_count::int, online_count::int, offline_count::int, open_alert_count::int
+     FROM mv_site_summary ORDER BY open_alert_count DESC`
+  );
+  return JSON.stringify({
+    totalSites: Number((total.rows[0] as { count: number }).count),
+    sites: r.rows.map((row: Record<string, unknown>) => ({
+      uid: row.site_uid,
+      name: row.site_name,
+      devices: row.device_count,
+      online: row.online_count,
+      alerts: row.open_alert_count,
+    })),
+  });
+}
+
+export async function cachedListCriticalAlerts(db: Pool): Promise<string> {
+  const r = await db.query(`SELECT * FROM mv_critical_alerts`);
+  const priorities = await db.query(`SELECT * FROM mv_alert_priority`);
+  return JSON.stringify({
+    priorityBreakdown: priorities.rows.map((row: Record<string, unknown>) => ({
+      priority: row.priority,
+      count: Number(row.alert_count),
+      affectedDevices: Number(row.affected_devices),
+      affectedSites: Number(row.affected_sites),
+    })),
+    topAlerts: r.rows.map((row: Record<string, unknown>) => ({
+      alertUid: row.alert_uid,
+      deviceUid: row.device_uid,
+      hostname: row.hostname,
+      siteName: row.site_name,
+      priority: row.priority,
+      message: row.alert_message,
+      timestamp: row.alert_timestamp,
+    })),
+  });
 }
 
 // ── Filters ────────────────────────────────────────────────────────────────
@@ -380,6 +530,11 @@ export async function executeCachedTool(
     // Filters
     case "list-default-filters":    return cachedListDefaultFilters(db);
     case "list-custom-filters":     return cachedListCustomFilters(db);
+
+    // Materialized view tools (Stage 3)
+    case "get-fleet-status":        return cachedGetFleetStatus(db);
+    case "list-site-summaries":     return cachedListSiteSummaries(db);
+    case "list-critical-alerts":    return cachedListCriticalAlerts(db);
 
     default:
       throw new Error(`Tool "${toolName}" has no cached equivalent`);

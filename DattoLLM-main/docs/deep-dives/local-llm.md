@@ -4,7 +4,7 @@ tags:
   - llm
   - routing
 type: Deep Dive
-description: Multi-model LLM routing architecture — LiteLLM gateway, two-stage pipeline, and auto-routing rules
+description: Multi-model LLM routing architecture — LiteLLM gateway, Ollama local models, two-stage pipeline, and auto-routing rules
 aliases:
   - LLM Routing
   - Model Routing
@@ -13,7 +13,7 @@ aliases:
 # Local LLM — Multi-Model Routing Architecture
 
 > Parent: [[PLATFORM_BRAIN]] · See also: LLM Routing Setup Guide section in PLATFORM_BRAIN
-> Status: **Implemented** — LiteLLM gateway, two-stage pipeline, routing config table, and admin UI all operational
+> Status: **Implemented** — LiteLLM gateway, Ollama local models, two-stage pipeline, routing config table, and admin UI all operational
 > Depends on: [[local-data]] (cached Datto data must exist for cached-mode queries)
 
 ---
@@ -23,66 +23,55 @@ aliases:
 Every chat request runs through a two-stage pipeline (see [[Chat Request Flow]]):
 
 ```
-User → [[AI Service]] → LiteLLM:4000 → provider API
+User → [[AI Service]] → LiteLLM:4000 → provider API (cloud)
+                                      → Ollama:11434 (local)
 ```
 
-- **Stage 1 (Orchestrator):** selects tools, builds queries — uses a capable but cost-efficient model (Haiku by default)
-- **Stage 2 (Synthesizer):** reads tool results, writes prose — routed by data size and risk level
+- **Stage 1 (Orchestrator):** selects tools, builds queries — uses a capable but cost-efficient model (Haiku by default, cloud only — local models do not support tool calling)
+- **Stage 2 (Synthesizer):** reads tool results, writes prose — routed by data size and risk level. Can use local Ollama models for cached-mode queries.
 - Model selection is stored in the `llm_routing_config` DB table ([[PostgreSQL]]) — change via admin panel with no restart needed
 - All LLM calls route through LiteLLM (`http://litellm:4000`) which handles provider translation
+- Models prefixed with `local/` are routed by LiteLLM to Ollama (`http://ollama:11434`)
 
 ---
 
-## Proposed Architecture
+## Ollama — Local Model Runtime
 
-Two changes:
+**What it is:** Docker container (`ollama/ollama:latest`) running on the internal network. Serves local models for synthesis and embeddings with zero cloud cost.
 
-1. **LiteLLM gateway** — sits between the [[AI Service]] and all LLM providers. One unified API, swap providers in config not code.
-2. **Two-stage pipeline** — split the agentic loop into an orchestrator stage (tool calling) and a synthesizer stage (response writing). Different models can handle each stage.
+**Docker service:** `ollama` — internal network only, no port exposure. Data persisted in `ollama_data` volume.
 
-```
-User question
-      ↓
-AI Service
-      ↓
-┌─────────────────────────────┐
-│  Stage 1: Orchestrator      │  ← picks tools, builds queries
-│  Model: configurable        │  ← must support tool calling
-└─────────────────────────────┘
-      ↓ tool selected
-[[MCP Bridge]] → Datto API (live)
-  OR
-Local [[PostgreSQL]] cache (cached mode)
-      ↓ data returned
-┌─────────────────────────────┐
-│  Stage 2: Synthesizer       │  ← reads data, writes response
-│  Model: configurable        │  ← any model, no tool calling needed
-└─────────────────────────────┘
-      ↓
-Response to user
-```
+**Models:**
 
----
+| Model | Size | Use | Pull command |
+|---|---|---|---|
+| `qwen3:1.7b` | ~1.4 GB | Synthesis (Stage 2) | `docker compose exec ollama ollama pull qwen3:1.7b` |
+| `nomic-embed-text` | ~0.3 GB | Local embeddings (768 dims) | `docker compose exec ollama ollama pull nomic-embed-text` |
 
-## LiteLLM Gateway
+> [!warning] Model choice: why 1.7b not 8b
+> Originally tested with `qwen3:8b` (~5.2 GB). On CPU-only Docker (no GPU passthrough), inference took **2+ minutes per response** — unusable. The 1.7b variant runs in **~10–30 seconds on CPU**, which is acceptable for cached-mode synthesis where the data is already local.
 
-**What it is:** Open source Docker container. Provides one OpenAI-compatible API endpoint that routes to any provider.
+**Qwen3 thinking mode:** Qwen3 models default to a "thinking" mode that puts output in `reasoning_content` instead of `content`. The AI service passes `extra_body: { think: false }` via LiteLLM for all local models to disable this and get direct content output. This is handled in `modelRouter.ts`.
 
-**Why it's needed:**
-- Claude, Gemini, DeepSeek, OpenAI all have different API formats
-- Without it, switching providers means rewriting API calls
-- With it, changing the model is a config value, not a code change
+**LiteLLM config** (`services/litellm/config.yaml`):
 
-**Docker service:** `litellm` — added to `docker-compose.yml`, internal network only
-
-**How the AI service uses it:**
-
-```
-Current:  ai-service → api.anthropic.com (direct)
-Proposed: ai-service → litellm:4000 → api.anthropic.com / generativelanguage.googleapis.com / api.deepseek.com
+```yaml
+- model_name: local/qwen3-1.7b
+  litellm_params:
+    model: ollama_chat/qwen3:1.7b
+    api_base: http://ollama:11434
+    supports_function_calling: false
+    request_timeout: 60
 ```
 
-The AI service sends every LLM call to `http://litellm:4000` with a model name like `claude-opus-4-6` or `deepseek/deepseek-r1`. LiteLLM handles authentication and routing to the correct provider.
+The `local/` prefix is a naming convention — any model name starting with `local/` is routed to Ollama. `supports_function_calling: false` ensures LiteLLM never sends tool schemas to local models.
+
+**Routing flow:**
+
+```
+ai-service → LiteLLM:4000 → (model starts with local/) → Ollama:11434
+                           → (cloud model)              → OpenRouter → provider API
+```
 
 ---
 
@@ -104,7 +93,7 @@ The AI service sends every LLM call to `http://litellm:4000` with a model name l
 | `claude-opus-4-6` | Complex multi-step queries | High |
 | `gpt-4o` | Alternative if Claude unavailable | Medium |
 
-**Not suitable:** DeepSeek R1, Gemini Flash (unreliable tool calling)
+**Not suitable:** Local models (no tool calling), DeepSeek R1, Gemini Flash (unreliable tool calling)
 
 ---
 
@@ -124,6 +113,7 @@ The AI service sends every LLM call to `http://litellm:4000` with a model name l
 | `deepseek/deepseek-r1` | Large data summarisation, reports | Very low |
 | `claude-opus-4-6` | Complex analysis, sensitive operations | High |
 | `gemini/gemini-2.0-flash` | Fast large-context processing | Low |
+| `local/qwen3-1.7b` | Cached-mode queries, zero cloud cost | Free (CPU) |
 
 ---
 
@@ -161,8 +151,8 @@ Rule 2: A high-risk tool was called during this request
         Reason: careful, accurate response for sensitive operations
 
 Rule 3: Cached mode query (data came from local DB, no live Datto call)
-        → use claude-haiku-4-5
-        Reason: simple structured data, no need for large model
+        → use local/qwen3-1.7b (Ollama)
+        Reason: data is already local, no need for cloud model — zero cost
 
 Rule 4: Default
         → use claude-haiku-4-5
@@ -191,7 +181,7 @@ CREATE TABLE llm_routing_config (
 | `synthesizer_default` | `claude-haiku-4-5` | Default response generation |
 | `synthesizer_large_data` | `deepseek/deepseek-r1` | When tool result exceeds 8,000 chars |
 | `synthesizer_high_risk` | `claude-opus-4-6` | When a high-risk tool was called |
-| `synthesizer_cached` | `claude-haiku-4-5` | When data came from local cache |
+| `synthesizer_cached` | `local/qwen3-1.7b` | When data came from local cache (zero cloud cost) |
 
 ---
 
@@ -255,6 +245,7 @@ Fallback chain is configurable in LiteLLM config.
 - The [[Tool Router]] and tool registry are untouched
 - The agentic loop logic is the same — only the model names are swapped per stage
 - The [[Web App]] admin panel gains one new page
+- Ollama runs on the internal Docker network only — no external access
 
 ---
 
@@ -270,6 +261,8 @@ All items below are complete:
 6. ~~Add provider key management to `.env` and LiteLLM config~~ ✅ (OpenRouter primary)
 7. ~~SEC-Routing-001: scope-based high-risk routing for both stages~~ ✅
 8. ~~LLM request logs with model columns~~ ✅ (`db/013_llm_logs_models.sql`)
+9. ~~Ollama container with qwen3:1.7b and nomic-embed-text~~ ✅ (Docker Compose, internal network)
+10. ~~Qwen3 thinking mode disabled via `extra_body: { think: false }`~~ ✅ (`modelRouter.ts`)
 
 ---
 

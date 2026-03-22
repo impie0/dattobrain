@@ -102,49 +102,99 @@ export async function handleObsOverview(req: Request, res: Response, pool: Pool)
 export async function handleObsLlm(req: Request, res: Response, pool: Pool): Promise<void> {
   if (!onlyAdmin(req, res)) return;
   try {
-    const [summary, byOrch, bySynth, tokenSeries, recent] = await Promise.all([
+    const [summary, byOrch, bySynth, byProvider, tokenSeries, recent] = await Promise.all([
       pool.query(`
         SELECT
           COUNT(*) AS total,
-          COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') AS total_24h
+          COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') AS total_24h,
+          COALESCE(SUM(total_tokens) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours'), 0) AS tokens_24h,
+          COALESCE(SUM(orch_total_tokens) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours'), 0) AS orch_tokens_24h,
+          COALESCE(SUM(synth_total_tokens) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours'), 0) AS synth_tokens_24h,
+          COALESCE(AVG(total_tokens) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours' AND total_tokens > 0), 0) AS avg_tokens,
+          COALESCE(AVG(orch_total_tokens) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours' AND orch_total_tokens > 0), 0) AS avg_orch_tokens,
+          COALESCE(AVG(synth_total_tokens) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours' AND synth_total_tokens > 0), 0) AS avg_synth_tokens,
+          COUNT(*) FILTER (WHERE prequery_hit = true AND created_at > NOW() - INTERVAL '24 hours') AS prequery_hits_24h,
+          COALESCE(AVG(orch_iterations) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours' AND orch_iterations > 0), 0) AS avg_iterations
         FROM llm_request_logs`),
 
       pool.query(`
-        SELECT orchestrator_model AS model, COUNT(*) AS count
+        SELECT orchestrator_model AS model, COUNT(*) AS count,
+               COALESCE(SUM(orch_total_tokens), 0) AS tokens,
+               COALESCE(AVG(orch_total_tokens), 0)::int AS avg_tokens
         FROM llm_request_logs
         WHERE created_at > NOW() - INTERVAL '24 hours' AND orchestrator_model IS NOT NULL
         GROUP BY orchestrator_model ORDER BY count DESC`),
 
       pool.query(`
-        SELECT synthesizer_model AS model, COUNT(*) AS count
+        SELECT synthesizer_model AS model, COUNT(*) AS count,
+               COALESCE(SUM(synth_total_tokens), 0) AS tokens,
+               COALESCE(AVG(synth_total_tokens), 0)::int AS avg_tokens
         FROM llm_request_logs
         WHERE created_at > NOW() - INTERVAL '24 hours' AND synthesizer_model IS NOT NULL
         GROUP BY synthesizer_model ORDER BY count DESC`),
 
       pool.query(`
-        SELECT DATE_TRUNC('hour', created_at) AS t, COALESCE(SUM(token_count), 0) AS v
-        FROM chat_messages
-        WHERE created_at > NOW() - INTERVAL '24 hours' AND token_count IS NOT NULL
+        SELECT
+          COALESCE(orchestrator_provider, 'unknown') AS provider,
+          'orchestrator' AS stage,
+          COUNT(*) AS count,
+          COALESCE(SUM(orch_total_tokens), 0) AS tokens
+        FROM llm_request_logs
+        WHERE created_at > NOW() - INTERVAL '24 hours'
+        GROUP BY orchestrator_provider
+        UNION ALL
+        SELECT
+          COALESCE(synth_provider, 'unknown') AS provider,
+          'synthesizer' AS stage,
+          COUNT(*) AS count,
+          COALESCE(SUM(synth_total_tokens), 0) AS tokens
+        FROM llm_request_logs
+        WHERE created_at > NOW() - INTERVAL '24 hours' AND synthesizer_model IS NOT NULL
+        GROUP BY synth_provider
+        ORDER BY stage, provider`),
+
+      pool.query(`
+        SELECT DATE_TRUNC('hour', created_at) AS t,
+               COALESCE(SUM(total_tokens), 0) AS total,
+               COALESCE(SUM(orch_total_tokens), 0) AS orch,
+               COALESCE(SUM(synth_total_tokens), 0) AS synth
+        FROM llm_request_logs
+        WHERE created_at > NOW() - INTERVAL '24 hours'
         GROUP BY t ORDER BY t`),
 
       pool.query(`
         SELECT l.id, l.created_at, l.orchestrator_model, l.synthesizer_model,
-               l.tools_called, u.username,
-               (SELECT SUM(m.token_count)
-                FROM chat_messages m
-                WHERE m.session_id = l.session_id AND m.token_count IS NOT NULL
-               ) AS tokens
+               l.orchestrator_provider, l.synth_provider, l.data_mode,
+               l.orch_prompt_tokens, l.orch_completion_tokens, l.orch_total_tokens,
+               l.synth_prompt_tokens, l.synth_completion_tokens, l.synth_total_tokens,
+               l.total_tokens, l.orch_iterations, l.tool_result_chars,
+               l.tools_called, l.prequery_hit, l.prequery_tool, u.username
         FROM llm_request_logs l
         LEFT JOIN users u ON u.id = l.user_id
         ORDER BY l.created_at DESC
         LIMIT 100`),
     ]);
 
+    const s = summary.rows[0];
     res.json({
-      summary:      { total: +summary.rows[0].total, total24h: +summary.rows[0].total_24h },
-      byOrchModel:  byOrch.rows.map( (r: { model: string; count: string }) => ({ model: r.model, count: +r.count })),
-      bySynthModel: bySynth.rows.map((r: { model: string; count: string }) => ({ model: r.model, count: +r.count })),
-      tokenSeries:  tokenSeries.rows.map((r: { t: Date; v: string }) => ({ t: r.t, v: +r.v || 0 })),
+      summary: {
+        total: +s.total,
+        total24h: +s.total_24h,
+        tokens24h: +s.tokens_24h,
+        orchTokens24h: +s.orch_tokens_24h,
+        synthTokens24h: +s.synth_tokens_24h,
+        avgTokens: Math.round(+s.avg_tokens),
+        avgOrchTokens: Math.round(+s.avg_orch_tokens),
+        avgSynthTokens: Math.round(+s.avg_synth_tokens),
+        prequeryHits24h: +s.prequery_hits_24h,
+        avgIterations: Math.round(+s.avg_iterations * 10) / 10,
+      },
+      byOrchModel:  byOrch.rows.map( (r: { model: string; count: string; tokens: string; avg_tokens: number }) => ({ model: r.model, count: +r.count, tokens: +r.tokens, avgTokens: r.avg_tokens })),
+      bySynthModel: bySynth.rows.map((r: { model: string; count: string; tokens: string; avg_tokens: number }) => ({ model: r.model, count: +r.count, tokens: +r.tokens, avgTokens: r.avg_tokens })),
+      byProvider:   byProvider.rows.map((r: { provider: string; stage: string; count: string; tokens: string }) => ({ provider: r.provider, stage: r.stage, count: +r.count, tokens: +r.tokens })),
+      tokenSeries:  tokenSeries.rows.map((r: { t: Date; total: string; orch: string; synth: string }) => ({
+        t: r.t, total: +r.total || 0, orch: +r.orch || 0, synth: +r.synth || 0,
+      })),
       recent:       recent.rows,
     });
   } catch (err) {

@@ -227,6 +227,25 @@ docker compose logs <service-name> | tail -30
 
 ---
 
+## Step 3b: Pull Ollama models
+
+Ollama starts with no models. Pull the required models after the stack is running:
+
+```bash
+docker compose exec ollama ollama pull qwen3:1.7b
+docker compose exec ollama ollama pull nomic-embed-text
+```
+
+- `qwen3:1.7b` (~1.4 GB) — local synthesis model for cached-mode queries
+- `nomic-embed-text` (~0.3 GB) — local embeddings (768 dimensions)
+
+Models are persisted in the `ollama_data` Docker volume — you only need to pull once unless you recreate volumes.
+
+> [!note] Why not qwen3:8b?
+> The 8B model (~5.2 GB) was tested but takes 2+ minutes per inference on CPU-only Docker. The 1.7B model runs in ~10–30 seconds on CPU, which is acceptable for cached-mode synthesis.
+
+---
+
 ## Step 4: Push APISIX routes
 
 APISIX routes are stored in etcd, not in config files. They must be pushed after every fresh `docker compose up`:
@@ -246,6 +265,8 @@ Expected output:
 ... (12 routes total)
 All done!
 ```
+
+The chat route (`/api/chat`) has a **180-second timeout** configured in APISIX to accommodate local Ollama model inference, which can take 10–30 seconds on CPU.
 
 If the script hangs at "Waiting for APISIX Admin API...":
 - Check APISIX logs: `docker compose logs apisix`
@@ -302,6 +323,17 @@ curl -s -X POST http://localhost/api/chat \
 ```
 
 Expected: An AI-generated response. If you get a timeout, check LiteLLM and OpenRouter API key.
+
+To test cached mode (uses local Ollama model, no cloud cost):
+
+```bash
+curl -s -X POST http://localhost/api/chat \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"question":"How many devices do we have?","session_id":"test-session","data_mode":"cached"}' | jq .answer
+```
+
+The `data_mode` field (`"cached"` or `"live"`) and `session_id` are sent in the request body. The mode persists per session — subsequent messages in the same session use the last-set mode.
 
 ### 5d. APISIX routes
 
@@ -436,7 +468,8 @@ curl -X PUT http://localhost:6001/api/admin/llm-config \
 
 ```
 Browser → APISIX (:80) → Auth Service (:5001)
-                        → AI Service (:6001) → LiteLLM (:4000) → OpenRouter
+                        → AI Service (:6001) → LiteLLM (:4000) → OpenRouter (cloud models)
+                                                                → Ollama (:11434) (local/ prefix models)
                                              → MCP Bridge (:4001) → MCP Server (:3001) → Datto API
                                              → Embedding Service (:7001) → Voyage/OpenAI
                         → Web App (:3000)

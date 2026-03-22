@@ -294,6 +294,30 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # ── Ollama — Local LLM Runtime ──────────────────────────────────────────────
+  # Runs Qwen3 8B (synthesis) and nomic-embed-text (embeddings) locally.
+  # SEC: internal network only — no port exposure, no external access.
+  # Models are persisted in the ollama_data volume.
+  # First start: models are pulled automatically by the entrypoint.
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - internal
+    deploy:
+      resources:
+        limits:
+          memory: 16G
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
 networks:
   public:
   internal:
@@ -303,3 +327,4 @@ volumes:
   postgres_data:
   etcd_data:
   cve_cache:
+  ollama_data:

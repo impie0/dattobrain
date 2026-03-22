@@ -42,7 +42,7 @@ File: `mcp-bridge/src/index.ts`
 | `POST /tool-call` | `index.ts` | Validate fields → `resolveAllowedTools` → `checkPermission` → `callMcpTool` |
 | `resolveAllowedTools` | `index.ts` | SEC-MCP-001: Introspect JWT via auth-service to get DB-sourced `allowedTools`; trusts caller only if `X-Internal-Secret` matches |
 | `checkPermission` | `validate.ts` | Returns 403 if `toolName` not in DB-sourced `allowedTools` |
-| `callMcpTool` | `mcpClient.ts` | POST JSON-RPC to MCP Server, retry 3× on 503 |
+| `callMcpTool` | `mcpClient.ts` | POST JSON-RPC to MCP Server, retry 3× on 503, collect trace spans |
 
 ## Retry Policy
 
@@ -51,6 +51,20 @@ File: `mcpClient.ts`
 - 401 → throw immediately
 - 503 / network error → retry 1s / 2s / 4s backoff
 - Exhausted → `{ isError: true, result: "MCP Server unavailable" }`
+
+## Tracing Spans
+
+The bridge generates structured trace spans for every tool call request and sends them back to the [[AI Service]] via the `_traceSpans` field in the response body. The AI Service ingests these through `POST /api/internal/trace-spans`.
+
+| Span Operation | Service | Description |
+|---|---|---|
+| `bridge_tool_call` | `mcp-bridge` | Top-level span wrapping the entire tool-call flow (permission + MCP call). Includes request/response payloads and duration |
+| `permission_check` | `mcp-bridge` | Permission resolution — records whether internal-secret or JWT introspect path was used, and whether the tool was allowed |
+| `token_introspect` | `auth-service` | JWT introspection call to auth-service `/auth/introspect`. Records validity, tool count, and any errors |
+| `mcp_tool_call` | `mcp-server` | JSON-RPC call to [[MCP Server]]. Records tool name, args, result preview, result size, and retry count |
+| `datto_api_call` | `datto-api` | Upstream Datto REST API call (fetched from MCP Server's `/trace-spans`). Records URL, method, status code, response size, retry flag |
+
+Spans carry `X-Trace-Id` and `X-Parent-Span-Id` headers from the AI Service for cross-service correlation.
 
 ## Connections
 

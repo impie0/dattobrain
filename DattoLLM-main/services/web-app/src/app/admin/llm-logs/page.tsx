@@ -206,7 +206,7 @@ export default function LlmLogsPage() {
               )}
               {activeTab === "messages" && (
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-                  {(selected.messages ?? []).map((msg, i) => (
+                  {((selected.messages ?? []) as { role: string; content: unknown }[]).map((msg, i) => (
                     <div
                       key={i}
                       style={{

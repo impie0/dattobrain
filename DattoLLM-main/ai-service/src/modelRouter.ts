@@ -35,6 +35,10 @@ export function isAnthropicModel(model: string): boolean {
   return model.startsWith("claude-");
 }
 
+export function isLocalModel(model: string): boolean {
+  return model.startsWith("local/");
+}
+
 // ── Synthesis interfaces ─────────────────────────────────────────────────────
 
 export interface SynthesisOptions {
@@ -46,13 +50,31 @@ export interface SynthesisOptions {
 
 // ── Non-streaming synthesis (legacyChat.ts Stage 2) ─────────────────────────
 
-export async function synthesize(opts: SynthesisOptions): Promise<string> {
+export interface SynthesisResult {
+  content: string;
+  usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+}
+
+export async function synthesize(opts: SynthesisOptions): Promise<SynthesisResult> {
+  // Local Ollama models (Qwen3) default to "thinking mode" which puts output
+  // in reasoning_content instead of content. Pass extra_body.think=false to
+  // disable thinking and get direct content output.
+  const extra = isLocalModel(opts.model) ? { think: false } : {};
+
   const completion = await llmClient.chat.completions.create({
     model: opts.model,
     messages: [{ role: "system", content: opts.systemPrompt }, ...opts.messages],
     max_tokens: opts.maxTokens ?? 4096,
-  });
-  return completion.choices[0]?.message.content ?? "";
+    ...extra,
+  } as OpenAI.ChatCompletionCreateParamsNonStreaming);
+  return {
+    content: completion.choices[0]?.message.content ?? "",
+    usage: {
+      prompt_tokens: completion.usage?.prompt_tokens ?? 0,
+      completion_tokens: completion.usage?.completion_tokens ?? 0,
+      total_tokens: completion.usage?.total_tokens ?? 0,
+    },
+  };
 }
 
 // ── Streaming synthesis (chat.ts Stage 2) — yields text deltas ───────────────
@@ -60,12 +82,15 @@ export async function synthesize(opts: SynthesisOptions): Promise<string> {
 export async function* synthesizeStream(
   opts: SynthesisOptions
 ): AsyncGenerator<string> {
+  const extra = isLocalModel(opts.model) ? { think: false } : {};
+
   const stream = await llmClient.chat.completions.create({
     model: opts.model,
     messages: [{ role: "system", content: opts.systemPrompt }, ...opts.messages],
     max_tokens: opts.maxTokens ?? 4096,
     stream: true,
-  });
+    ...extra,
+  } as OpenAI.ChatCompletionCreateParamsStreaming);
 
   for await (const chunk of stream) {
     const delta = chunk.choices[0]?.delta.content;

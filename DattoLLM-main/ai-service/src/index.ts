@@ -65,8 +65,32 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ── SEC: Per-user rate limiting for chat endpoints ──────────────────────────
+const chatRateMap = new Map<string, { count: number; resetAt: number }>();
+function chatRateLimit(req: express.Request, res: express.Response, next: express.NextFunction): void {
+  const userId = req.headers["x-user-id"] as string;
+  if (!userId) { next(); return; }
+  const now = Date.now();
+  let entry = chatRateMap.get(userId);
+  if (!entry || now > entry.resetAt) {
+    entry = { count: 0, resetAt: now + 60_000 }; // 1-minute window
+    chatRateMap.set(userId, entry);
+  }
+  entry.count++;
+  if (entry.count > 10) { // 10 requests/minute per user
+    res.status(429).json({ error: "Rate limit exceeded. Max 10 chat requests per minute." });
+    return;
+  }
+  next();
+}
+// Clean up stale entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of chatRateMap) { if (now > v.resetAt) chatRateMap.delete(k); }
+}, 300_000);
+
 // ── Legacy chat & history ──────────────────────────────────────────────────
-app.post("/api/chat", handleLegacyChat);
+app.post("/api/chat", chatRateLimit, handleLegacyChat);
 app.post("/api/chat/mode", handleSetDataMode);
 app.get("/api/history", handleHistory);
 app.get("/api/history/:id", async (req, res) => {
@@ -169,31 +193,31 @@ app.post("/api/admin/users/:id/revoke", async (req, res) => {
 });
 
 // ── Admin — users ──────────────────────────────────────────────────────────
-app.get("/api/admin/users", handleAdminGetUsers);
-app.post("/api/admin/users", handleAdminCreateUser);
-app.patch("/api/admin/users/:id", handleAdminUpdateUser);
-app.patch("/api/admin/users/:id/password", handleAdminChangePassword);
-app.get("/api/admin/users/:id/tools", handleAdminGetUserTools);
-app.put("/api/admin/users/:id/tools", handleAdminSetUserTools);
+app.get("/api/admin/users", adminOnly, handleAdminGetUsers);
+app.post("/api/admin/users", adminOnly, handleAdminCreateUser);
+app.patch("/api/admin/users/:id", adminOnly, handleAdminUpdateUser);
+app.patch("/api/admin/users/:id/password", adminOnly, handleAdminChangePassword);
+app.get("/api/admin/users/:id/tools", adminOnly, handleAdminGetUserTools);
+app.put("/api/admin/users/:id/tools", adminOnly, handleAdminSetUserTools);
 
 // ── Admin — roles ──────────────────────────────────────────────────────────
-app.get("/api/admin/roles", handleAdminGetRoles);
-app.put("/api/admin/roles/:role", handleAdminSaveRole);
-app.delete("/api/admin/roles/:role", handleAdminDeleteRole);
+app.get("/api/admin/roles", adminOnly, handleAdminGetRoles);
+app.put("/api/admin/roles/:role", adminOnly, handleAdminSaveRole);
+app.delete("/api/admin/roles/:role", adminOnly, handleAdminDeleteRole);
 
 // ── Admin — tools ──────────────────────────────────────────────────────────
-app.get("/api/admin/tools", handleAdminGetTools);
-app.patch("/api/admin/tools/:toolName", handleAdminUpdateTool);
+app.get("/api/admin/tools", adminOnly, handleAdminGetTools);
+app.patch("/api/admin/tools/:toolName", adminOnly, handleAdminUpdateTool);
 
 // ── Admin — approvals ──────────────────────────────────────────────────────
-app.get("/api/admin/approvals", handleAdminGetApprovals);
-app.post("/api/admin/approvals/:id/approve", handleAdminApproveRequest);
-app.post("/api/admin/approvals/:id/reject", handleAdminRejectRequest);
+app.get("/api/admin/approvals", adminOnly, handleAdminGetApprovals);
+app.post("/api/admin/approvals/:id/approve", adminOnly, handleAdminApproveRequest);
+app.post("/api/admin/approvals/:id/reject", adminOnly, handleAdminRejectRequest);
 
 // ── Admin — LLM routing config ─────────────────────────────────────────────
-app.get("/api/admin/llm-config", handleAdminGetLlmConfig);
-app.put("/api/admin/llm-config", handleAdminPutLlmConfig);
-app.get("/api/admin/llm-config/models", handleAdminGetLlmModels);
+app.get("/api/admin/llm-config", adminOnly, handleAdminGetLlmConfig);
+app.put("/api/admin/llm-config", adminOnly, handleAdminPutLlmConfig);
+app.get("/api/admin/llm-config/models", adminOnly, handleAdminGetLlmModels);
 
 // ── LLM request log ────────────────────────────────────────────────────────
 app.get("/api/admin/llm-logs", async (req, res) => {
@@ -212,6 +236,10 @@ app.get("/api/admin/llm-logs", async (req, res) => {
       const result = await pool.query(
         `SELECT l.id, l.session_id, l.user_id, u.username, l.tool_names, l.tools_called,
                 l.orchestrator_model, l.synthesizer_model, l.created_at,
+                l.data_mode, l.orchestrator_provider, l.synth_provider,
+                l.orch_prompt_tokens, l.orch_completion_tokens, l.orch_total_tokens, l.orch_iterations,
+                l.synth_prompt_tokens, l.synth_completion_tokens, l.synth_total_tokens,
+                l.total_tokens, l.tool_result_chars, l.prequery_hit, l.prequery_tool,
                 LEFT(l.system_prompt, 200) AS system_prompt_preview,
                 jsonb_array_length(l.messages) AS message_count
          FROM llm_request_logs l LEFT JOIN users u ON u.id=l.user_id
@@ -331,7 +359,7 @@ app.get("/api/admin/observability/traces/:traceId", adminOnly, (req, res) => han
 app.post("/api/internal/trace-spans", (req, res) => handleIngestSpans(req, res, pool));
 
 // ── Platform SSE route ─────────────────────────────────────────────────────
-app.post("/chat", handleChat);
+app.post("/chat", chatRateLimit, handleChat);
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });

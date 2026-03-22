@@ -7,7 +7,7 @@ aliases:
   - db
   - database
 type: Database
-description: pgvector/pg16 instance hosting all 33 platform tables — auth, chat, LLM routing, voice, CVE scanner, and 15 Datto cache tables
+description: pgvector/pg16 instance hosting all 33 platform tables + 5 materialized views — auth, chat, LLM routing, voice, CVE scanner, and 15 Datto cache tables
 ---
 
 # PostgreSQL
@@ -71,9 +71,23 @@ description: pgvector/pg16 instance hosting all 33 platform tables — auth, cha
 | `datto_cache_components` | Job components |
 | `datto_cache_filters` | Default + custom device filters |
 
+## Materialized Views
+
+5 materialized views (migration 025) pre-compute summaries for instant LLM answers. Refreshed after every sync via `REFRESH MATERIALIZED VIEW CONCURRENTLY`.
+
+| View | Purpose | Size |
+|---|---|---|
+| `mv_fleet_status` | Single-row fleet overview — device counts, alert counts, sync timestamps | ~250 tokens |
+| `mv_site_summary` | Per-site health metrics — device/online/offline counts, open alerts | ~200 bytes/site |
+| `mv_critical_alerts` | Top 20 highest-priority open alerts with device/site context | ~1.5K tokens |
+| `mv_os_distribution` | OS breakdown with device counts and percentages | ~500 bytes |
+| `mv_alert_priority` | Alert counts by priority with affected device/site counts | ~200 bytes |
+
+Each view has a unique index to support `CONCURRENTLY` refresh.
+
 ## Migrations
 
-`db/001_extensions.sql` → `db/022_cve_scanner.sql` (21 migrations + `seed.sql`)
+`db/001_extensions.sql` → `db/026_llm_token_tracking.sql` (23 migrations + `seed.sql`)
 
 | Migration | Purpose |
 |---|---|
@@ -89,6 +103,8 @@ description: pgvector/pg16 instance hosting all 33 platform tables — auth, cha
 | 019_voice_device_mappings | SIP extension → DattoLLM user mapping for [[Voice Gateway]] |
 | 020_voice_routing_config | `synthesizer_voice` routing slot in `llm_routing_config` |
 | 022_cve_scanner | CVE scanner tables: `cve_database`, `cpe_dictionary`, `device_vulnerabilities`, `cve_sync_log` + views |
+| 025_materialized_views | 5 materialized views: `mv_fleet_status`, `mv_site_summary`, `mv_critical_alerts`, `mv_os_distribution`, `mv_alert_priority` |
+| 026_llm_token_tracking | 19 columns on `llm_request_logs`: per-stage token counts, providers, timing, pre-query tracking |
 
 **Seed:** `db/seed.sql` — 4 default users (`readonly_user`, `helpdesk_user`, `analyst_user`, `admin_user`), 4 roles, tool assignments, tool_policies, llm_request_logs
 

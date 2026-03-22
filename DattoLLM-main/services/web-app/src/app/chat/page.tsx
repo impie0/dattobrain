@@ -137,11 +137,14 @@ export default function ChatPage() {
     setLoading(true);
     setError("");
     try {
-      const { conversation_id, answer } = await chat(q);
+      // Pass activeSession + dataMode so the backend uses the correct mode from the start
+      const { conversation_id, answer } = await chat(q, activeSession, dataMode);
       setMessages((prev) => [...prev, { role: "assistant", text: answer }]);
+      // Persist data mode for new sessions immediately after first message
+      if (!activeSession) {
+        setDataMode(conversation_id, dataMode).catch(() => {});
+      }
       setActiveSession(conversation_id);
-      // Persist data mode for this session on first message
-      setDataMode(conversation_id, dataMode).catch(() => {});
       try { localStorage.setItem(LS_SESSION_KEY, conversation_id); } catch { /* ignore */ }
       // Refresh history sidebar
       getHistory(30, 0).then((r) => setHistoryItems(r.items)).catch(() => {});

@@ -10,6 +10,7 @@ import { buildSystemPrompt, buildSynthesizerPrompt } from "./prompt.js";
 import { writeDelta, writeToolCall, writeError, writeDone } from "./sse.js";
 import { executeCachedTool, isLiveOnlyTool } from "./cachedQueries.js";
 import { checkAndAuditToolPermission, toolDeniedMessage } from "./permissions.js";
+import { tryPreQuery } from "./preQuery.js";
 import {
   getRoutingConfig,
   selectOrchestratorModel,
@@ -69,7 +70,7 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
   const userId = req.headers["x-user-id"] as string | undefined;
   const allowedToolsStr = req.headers["x-allowed-tools"] as string | undefined;
   const sessionId = (req.headers["x-session-id"] as string | undefined) ?? randomUUID();
-  const { message } = req.body as { message?: string };
+  const { message, data_mode: requestDataMode } = req.body as { message?: string; data_mode?: string };
   // SEC-MCP-001: Extract JWT so the MCP bridge can independently verify permissions
   const authHeader = req.headers["authorization"] as string | undefined;
   const jwtToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
@@ -100,6 +101,24 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
   const trace = new TraceContext(pool, requestId);
   await trace.init({ userId, sessionId, question: message });
 
+  // ── Stage 4: Pre-Query — skip LLM for simple questions ──────────────────
+  const preQueryResult = await tryPreQuery(message, allowedTools, userId, pool);
+  if (preQueryResult) {
+    const pqSpan = await trace.startSpan("ai-service", "prequery_hit", {
+      requestPayload: { question: message.slice(0, 200), pattern: preQueryResult.toolUsed },
+    });
+    await pqSpan.end("ok", {
+      metadata: { tool: preQueryResult.toolUsed, source: "materialized_view", llmTokens: 0 },
+      responsePayload: { answerLength: preQueryResult.answer.length, answerPreview: preQueryResult.answer.slice(0, 300) },
+    });
+    await trace.complete("completed", { toolCount: 1 });
+    writeDelta(res, preQueryResult.answer, sessionId);
+    await saveMessages(sessionId, userId, message, preQueryResult.answer, [preQueryResult.toolUsed], pool, allowedTools)
+      .catch(() => {});
+    writeDone(res);
+    return;
+  }
+
   try {
     const rootSpan = await trace.startSpan("ai-service", "incoming_request", {
       requestPayload: {
@@ -122,10 +141,22 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
       [sessionId]
     ).catch(() => ({ rows: [] }));
     await sessSpan.end("ok", { metadata: { found: sessionRow.rows.length > 0, sessionId } });
+    // Data mode priority: request body > session DB > global default
+    const sessionDataMode = (sessionRow.rows[0] as { data_mode?: string } | undefined)?.data_mode;
     const dataMode: "cached" | "live" =
-      (sessionRow.rows[0] as { data_mode?: string } | undefined)?.data_mode === "live"
-        ? "live"
+      (requestDataMode === "live" || requestDataMode === "cached") ? requestDataMode
+        : sessionDataMode === "live" ? "live"
+        : sessionDataMode === "cached" ? "cached"
         : routingConfig.default_data_mode === "live" ? "live" : "cached";
+    // Persist the mode to the session so it sticks for future messages
+    if (requestDataMode === "live" || requestDataMode === "cached") {
+      pool.query(
+        `INSERT INTO chat_sessions (id, user_id, data_mode, updated_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (id) DO UPDATE SET data_mode = EXCLUDED.data_mode, updated_at = NOW()`,
+        [sessionId, userId, requestDataMode]
+      ).catch(() => {});
+    }
 
     // Load history + embed + search similar in parallel
     const promptSpan = await trace.startSpan("ai-service", "prompt_build", { parentSpanId: rootSpan.spanId });
@@ -134,7 +165,7 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
       (async () => {
         const s = await trace.startSpan("ai-service", "db_load_history", { parentSpanId: promptSpan.spanId, requestPayload: { sessionId } });
         try {
-          const h = await loadHistory(sessionId, pool);
+          const h = await loadHistory(sessionId, userId, pool);
           await s.end("ok", { metadata: { messageCount: h.length, sessionId } });
           return h;
         } catch (e) {
@@ -217,9 +248,14 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
     const CONTEXT_OVERFLOW_CHARS = 100_000;
 
     // ── STAGE 1: Orchestrator — tool selection loop ───────────────────────────
+    const MAX_TOOL_ITERATIONS = 12; // Safety cap — prevents runaway tool loops
     let stage1Iteration = 0;
     while (true) {
       stage1Iteration++;
+      if (stage1Iteration > MAX_TOOL_ITERATIONS) {
+        log("warn", "max_tool_iterations_reached", { requestId, iterations: stage1Iteration });
+        break;
+      }
       const llmSpan = await trace.startSpan("ai-service", `llm_stage1_iter_${stage1Iteration}`, {
         parentSpanId: rootSpan.spanId,
         requestPayload: { model: orchestratorModel, messageCount: conversationMessages.length },
@@ -262,7 +298,10 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
         }
       }
 
-      await litellmSpan.end("ok", { metadata: { model: orchestratorModel, finishReason }, responsePayload: { textLength: textChunk.length, toolCallCount: toolCallsMap.size } });
+      await litellmSpan.end("ok", {
+        metadata: { model: orchestratorModel, provider: orchestratorModel.startsWith("local/") ? "ollama" : "cloud", finishReason },
+        responsePayload: { textLength: textChunk.length, toolCallCount: toolCallsMap.size },
+      });
 
       fullStage1Content += textChunk;
 
@@ -322,19 +361,25 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
 
         let toolInput: Record<string, unknown>;
         try { toolInput = JSON.parse(tc.argsJson) as Record<string, unknown>; }
-        catch { toolInput = {}; }
+        catch {
+          // SEC: Don't default to empty args — empty args on list tools causes full data dump
+          conversationMessages.push({ role: "tool" as const, tool_call_id: tc.id, content: `Error: Invalid tool arguments for ${toolName}.` });
+          writeToolCall(res, toolName, "denied");
+          continue;
+        }
 
-        const toolSpan = await trace.startSpan("ai-service", "tool_call", {
+        const isCached = dataMode === "cached" && !isLiveOnlyTool(toolName);
+        const toolSpan = await trace.startSpan("ai-service", `tool_call [${toolName}] ${isCached ? "CACHED" : "LIVE→MCP"}`, {
           parentSpanId: rootSpan.spanId,
-          requestPayload: { toolName, toolInput, dataMode, cached: dataMode === "cached" && !isLiveOnlyTool(toolName) },
+          requestPayload: { toolName, toolInput, dataMode, source: isCached ? "postgres_cache" : "mcp_bridge→mcp_server→datto_api" },
         });
 
         let resultText: string;
-        if (dataMode === "cached" && !isLiveOnlyTool(toolName)) {
+        if (isCached) {
           try {
             const cacheSpan = await trace.startSpan("ai-service", "db_cached_query", { parentSpanId: toolSpan.spanId, requestPayload: { toolName, toolInput } });
             resultText = await executeCachedTool(toolName, toolInput, pool, allowedTools);
-            await cacheSpan.end("ok", { metadata: { toolName, source: "datto_cache" }, responsePayload: { resultLength: resultText.length } });
+            await cacheSpan.end("ok", { metadata: { toolName, source: "datto_cache" }, responsePayload: { resultLength: resultText.length, resultPreview: resultText.slice(0, 300) } });
           } catch {
             const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken, trace.traceId, toolSpan.spanId);
             resultText = typeof liveResult.result === "string" ? liveResult.result : JSON.stringify(liveResult.result);
@@ -342,6 +387,13 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
         } else {
           const liveResult = await callTool(toolName, toolInput, allowedTools, requestId, userId, jwtToken, trace.traceId, toolSpan.spanId);
           resultText = typeof liveResult.result === "string" ? liveResult.result : JSON.stringify(liveResult.result);
+        }
+
+        // Stage 2a: Hard cap on individual tool result size
+        const MAX_TOOL_RESULT_CHARS = 8_000;
+        if (resultText.length > MAX_TOOL_RESULT_CHARS) {
+          log("warn", "tool_result_truncated", { toolName, original: resultText.length, truncated: MAX_TOOL_RESULT_CHARS, requestId });
+          resultText = resultText.slice(0, MAX_TOOL_RESULT_CHARS) + `\n\n[Result truncated from ${resultText.length} to ${MAX_TOOL_RESULT_CHARS} chars. Use more specific filters to narrow results.]`;
         }
 
         totalToolResultLength += resultText.length;
@@ -380,14 +432,21 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
         totalToolResultLength,
       });
 
-      const synthSpan = await trace.startSpan("ai-service", "llm_stage2_synthesizer", {
+      const synthSpan = await trace.startSpan("ai-service", `llm_stage2_synthesizer [${synthModel}]`, {
         parentSpanId: rootSpan.spanId,
-        requestPayload: { model: synthModel, messageCount: conversationMessages.length, totalToolResultLength },
+        requestPayload: {
+          model: synthModel,
+          provider: synthModel.startsWith("local/") ? "ollama" : "cloud",
+          messageCount: conversationMessages.length,
+          totalToolResultLength,
+          dataMode,
+          toolsUsed,
+        },
       });
 
       const synthLitellmSpan = await trace.startSpan("litellm", "chat_completion", {
         parentSpanId: synthSpan.spanId,
-        requestPayload: { model: synthModel, stream: true, endpoint: "/v1/chat/completions", stage: "synthesizer" },
+        requestPayload: { model: synthModel, provider: synthModel.startsWith("local/") ? "ollama" : "cloud", stream: true, endpoint: "/v1/chat/completions", stage: "synthesizer" },
       });
       for await (const delta of synthesizeStream({
         model: synthModel,
@@ -398,11 +457,14 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
         writeDelta(res, delta, sessionId);
         fullAssistantContent += delta;
       }
-      await synthLitellmSpan.end("ok", { metadata: { model: synthModel }, responsePayload: { answerLength: fullAssistantContent.length } });
+      await synthLitellmSpan.end("ok", {
+        metadata: { model: synthModel, provider: synthModel.startsWith("local/") ? "ollama" : "cloud" },
+        responsePayload: { answerLength: fullAssistantContent.length, answerPreview: fullAssistantContent.slice(0, 300) },
+      });
 
       await synthSpan.end("ok", {
-        metadata: { model: synthModel, highRiskInScope, dataMode },
-        responsePayload: { answerLength: fullAssistantContent.length },
+        metadata: { model: synthModel, provider: synthModel.startsWith("local/") ? "ollama" : "cloud", highRiskInScope, dataMode },
+        responsePayload: { answerLength: fullAssistantContent.length, answerPreview: fullAssistantContent.slice(0, 300) },
       });
     } else {
       // No tools called — Stage 1 answer is the final response
@@ -443,8 +505,17 @@ export async function handleChat(req: Request, res: Response): Promise<void> {
     });
 
     await rootSpan.end("ok", {
-      metadata: { toolsUsed, orchestratorModel, synthModel: synthModel ?? null, dataMode },
-      responsePayload: { answerLength: fullAssistantContent.length },
+      metadata: {
+        toolsUsed,
+        orchestratorModel,
+        orchestratorProvider: orchestratorModel.startsWith("local/") ? "ollama" : "cloud",
+        synthModel: synthModel ?? null,
+        synthProvider: synthModel?.startsWith("local/") ? "ollama" : "cloud",
+        dataMode,
+        stage1Iterations: stage1Iteration,
+        totalToolResultLength,
+      },
+      responsePayload: { answerLength: fullAssistantContent.length, answerPreview: fullAssistantContent.slice(0, 300) },
     });
     await trace.complete("completed", { toolCount: toolsUsed.length });
 

@@ -3,14 +3,16 @@ import type OpenAI from "openai";
 
 export async function loadHistory(
   sessionId: string,
+  userId: string,
   db: Pool
 ): Promise<OpenAI.ChatCompletionMessageParam[]> {
+  // SEC: Filter by user_id to prevent cross-user session access
   const result = await db.query(
     `SELECT role, content FROM chat_messages
-     WHERE session_id = $1
+     WHERE session_id = $1 AND user_id = $2
      ORDER BY created_at ASC
      LIMIT 20`,
-    [sessionId]
+    [sessionId, userId]
   );
 
   return result.rows.map((row: { role: string; content: string }) => ({

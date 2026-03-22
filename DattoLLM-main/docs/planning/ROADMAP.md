@@ -38,6 +38,19 @@ aliases:
 
 ---
 
+## Post-Phase-0 Implementation Stages
+
+Incremental improvements shipped after Phase 0 hardening.
+
+- [x] **Stage 1 — Security fixes** — cross-user session hijack (`history.ts` user_id filter), tool arg parse (error instead of empty `{}`), rate limiting (10 req/min), tool denial normalization
+- [x] **Stage 2 — Truncation** — context overflow protection and large-result handling
+- [x] **Stage 3 — Materialized views** — 5 views (`mv_fleet_status`, `mv_site_summary`, `mv_critical_alerts`, `mv_os_distribution`, `mv_alert_priority`) refreshed after every sync; migration 025
+- [x] **Stage 4 — Pre-query** — pre-query system resolves common questions from materialized views without invoking the full agentic loop
+- [x] **Stage 5 — Ollama** — local model support via Ollama backend through LiteLLM
+- [ ] **Stage 6 — Local routing** — PARTIAL: works but slow on CPU; needs GPU or quantized models for production use
+
+---
+
 ## Phase 1 — Write tools (device management)
 
 **Gate: ALL of Phase 0, plus:**

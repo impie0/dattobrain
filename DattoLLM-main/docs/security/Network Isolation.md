@@ -7,7 +7,7 @@ type: Security
 aliases:
   - Docker Networks
   - Network Security
-description: Two Docker network topology ensuring internal services are structurally unreachable from the public internet
+description: Two Docker network topology ensuring internal services (including Ollama LLM runtime) are structurally unreachable from the public internet
 ---
 
 # Network Isolation
@@ -24,7 +24,7 @@ description: Two Docker network topology ensuring internal services are structur
 | Network | Members | Public? |
 |---|---|---|
 | `public` | [[API Gateway]], [[Web App]] | APISIX port 80 only |
-| `internal` (bridge) | All other services | No public ports |
+| `internal` (bridge) | All other services (including Ollama, LiteLLM) | No public ports |
 
 ## Reachability Matrix
 
@@ -34,8 +34,10 @@ flowchart TD
     Internet -->|"blocked"| MCP["MCP Server :3001"]
     Internet -->|"blocked"| AI["AI Service :6001"]
     Internet -->|"blocked"| Auth["Auth Service :5001"]
+    Internet -->|"blocked"| Ollama["Ollama :11434"]
     Bridge["MCP Bridge"] -->|"X-Internal-Secret"| MCP
     AI -->|"internal DNS"| Bridge
+    LiteLLM -->|"internal DNS"| Ollama
     APISIX -->|"internal DNS"| Auth
     APISIX -->|"internal DNS"| AI
 ```
@@ -76,6 +78,17 @@ flowchart LR
 > All voice containers run on the `internal` bridge network. No host networking needed. Phone connects to Asterisk via Docker port mapping (5060 on host → container).
 
 Voice-gateway authenticates as a service account with standard [[RBAC System|RBAC]] — no privilege escalation. Audio processed in-memory only, never persisted to disk.
+
+## Ollama — Local LLM Runtime (Internal)
+
+Ollama runs on the `internal` bridge network with **no port exposure** — not even to the host. LiteLLM connects to it via Docker internal DNS (`ollama:11434`). Models (Qwen3 1.7B for synthesis, nomic-embed-text for embeddings) are persisted in the `ollama_data` volume.
+
+| Container | Port | Access |
+|---|---|---|
+| ollama | 11434 (HTTP) | Internal only — no host port mapping, no public exposure |
+
+> [!warning] No external access by design
+> Unlike dev-exposed services (auth-service, ai-service), Ollama has ==zero port mappings== in `docker-compose.yml`. It is structurally unreachable from outside the Docker network.
 
 ## CVE Scanner (Internal)
 

@@ -607,6 +607,55 @@ Tool descriptions instruct the LLM to ALWAYS use filters when looking for specif
 
 ---
 
+## Materialized Views (Stage 3)
+
+After every sync (both full sync and alert-only sync), the sync pipeline refreshes five materialized views using `REFRESH MATERIALIZED VIEW CONCURRENTLY`. These pre-compute summaries that would otherwise require multiple tool calls and thousands of tokens.
+
+Migration: `db/025_materialized_views.sql`
+
+| View | Contents | Approx size |
+|---|---|---|
+| `mv_fleet_status` | Single row — total devices, online/offline counts, site count, alert counts, last sync times | ~250 tokens |
+| `mv_site_summary` | Per-site health metrics — device counts, online/offline, open alerts | ~200 bytes/site |
+| `mv_critical_alerts` | Top 20 highest-priority open alerts with device/site names | ~1.5K tokens |
+| `mv_os_distribution` | OS breakdown with device counts and percentages | ~500 bytes |
+| `mv_alert_priority` | Alert count by priority with affected device/site counts | ~200 bytes |
+
+All views have unique indexes to support `CONCURRENTLY` refresh. If the first concurrent refresh fails (e.g. on first run before the unique index exists), the sync falls back to a non-concurrent refresh.
+
+**Refresh points in `sync.ts`:**
+- After full sync completes (step 12)
+- After alert-only sync completes
+
+---
+
+## Pre-Query Engine (Stage 4)
+
+`preQuery.ts` intercepts simple questions and answers them directly from materialized views, **skipping the LLM entirely** — zero tokens, instant response.
+
+**How it works:**
+1. User question is matched against regex patterns (e.g. "how many devices", "fleet overview", "critical alerts")
+2. RBAC check — user must have the required tool permission (e.g. `get-fleet-status`, `list-sites`)
+3. Query runs against the appropriate materialized view
+4. Formatted markdown answer returned directly to the user
+
+**Patterns covered:**
+- Fleet overview / summary
+- Device counts (total, online, offline)
+- Site counts
+- Alert counts and priority breakdown
+- Top sites by alerts or device count
+- Critical/high-priority alerts
+- OS distribution
+- Last sync time
+- Specific site lookup (fuzzy ILIKE match on `mv_site_summary`)
+
+If no pattern matches or the answer is empty, the request falls through to the normal LLM pipeline.
+
+Pre-query executions are audit-logged with `event_type = "prequery"`.
+
+---
+
 ## Stage 2 Context Compression (SEC-015b)
 
 `compressForSynthesizer()` truncates large tool results before sending to Stage 2:
@@ -646,6 +695,8 @@ All items below are complete:
 9. ~~Fuzzy search with pg_trgm~~ ✅ (migration 018)
 10. ~~SEC-Cache-001 permission gate~~ ✅
 11. ~~Stage 2 context compression~~ ✅
+12. ~~Materialized views (5 views, refreshed after every sync)~~ ✅ (migration 025)
+13. ~~Pre-query engine for instant answers~~ ✅ (`preQuery.ts`)
 
 ---
 

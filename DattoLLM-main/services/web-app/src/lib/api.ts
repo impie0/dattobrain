@@ -27,16 +27,20 @@ export async function login(username: string, password: string): Promise<{ token
   return res.json();
 }
 
-export async function chat(question: string): Promise<{ conversation_id: string; answer: string }> {
+export async function chat(question: string, sessionId?: string | null, dataMode?: "cached" | "live"): Promise<{ conversation_id: string; answer: string }> {
   const token = getToken();
   if (!token) throw new Error("Not authenticated");
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
+  };
+  if (sessionId) headers["X-Session-Id"] = sessionId;
+  const body: Record<string, string> = { question };
+  if (dataMode) body.data_mode = dataMode;
   const res = await fetch(`${API_BASE}/api/chat`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify({ question }),
+    headers,
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
@@ -404,11 +408,6 @@ export interface LlmLogSummary {
   created_at: string;
 }
 
-export interface LlmLogDetail extends LlmLogSummary {
-  system_prompt: string;
-  messages: { role: string; content: unknown }[];
-}
-
 export async function getLlmLogs(limit?: number): Promise<LlmLogSummary[]> {
   const token = getToken();
   if (!token) throw new Error("Not authenticated");
@@ -417,16 +416,6 @@ export async function getLlmLogs(limit?: number): Promise<LlmLogSummary[]> {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) throw new Error("Failed to load LLM logs");
-  return res.json();
-}
-
-export async function getLlmLogDetail(id: string): Promise<LlmLogDetail> {
-  const token = getToken();
-  if (!token) throw new Error("Not authenticated");
-  const res = await fetch(`${API_BASE}/api/admin/llm-logs?id=${encodeURIComponent(id)}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) throw new Error("Failed to load LLM log");
   return res.json();
 }
 
@@ -581,14 +570,51 @@ export interface ObsOverview {
 export interface ObsLlmRow {
   id: string; created_at: string;
   orchestrator_model: string | null; synthesizer_model: string | null;
-  tools_called: string[]; username: string | null; tokens: number | null;
+  orchestrator_provider: string | null; synth_provider: string | null;
+  data_mode: string | null;
+  orch_prompt_tokens: number | null; orch_completion_tokens: number | null; orch_total_tokens: number | null;
+  orch_iterations: number | null;
+  synth_prompt_tokens: number | null; synth_completion_tokens: number | null; synth_total_tokens: number | null;
+  total_tokens: number | null; tool_result_chars: number | null;
+  prequery_hit: boolean | null; prequery_tool: string | null;
+  tools_called: string[]; username: string | null;
 }
 export interface ObsLlm {
-  summary:      { total: number; total24h: number };
-  byOrchModel:  { model: string; count: number }[];
-  bySynthModel: { model: string; count: number }[];
-  tokenSeries:  ObsSeries[];
+  summary: {
+    total: number; total24h: number;
+    tokens24h: number; orchTokens24h: number; synthTokens24h: number;
+    avgTokens: number; avgOrchTokens: number; avgSynthTokens: number;
+    prequeryHits24h: number; avgIterations: number;
+  };
+  byOrchModel:  { model: string; count: number; tokens: number; avgTokens: number }[];
+  bySynthModel: { model: string; count: number; tokens: number; avgTokens: number }[];
+  byProvider:   { provider: string; stage: string; count: number; tokens: number }[];
+  tokenSeries:  { t: string; total: number; orch: number; synth: number }[];
   recent:       ObsLlmRow[];
+}
+
+export interface LlmLogDetail {
+  id: string; session_id: string; created_at: string;
+  orchestrator_model: string | null; synthesizer_model: string | null;
+  system_prompt: string | null;
+  messages: unknown[];
+  tools_payload: unknown[];
+  tool_names: string[]; tools_called: string[];
+  data_mode: string | null;
+  orch_prompt_tokens: number | null; orch_completion_tokens: number | null; orch_total_tokens: number | null;
+  synth_prompt_tokens: number | null; synth_completion_tokens: number | null; synth_total_tokens: number | null;
+  total_tokens: number | null; orch_iterations: number | null; tool_result_chars: number | null;
+  username: string | null;
+}
+
+export async function getLlmLogDetail(id: string): Promise<LlmLogDetail | null> {
+  const token = getToken();
+  if (!token) throw new Error("Not authenticated");
+  const res = await fetch(`${API_BASE}/api/admin/llm-logs?id=${encodeURIComponent(id)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) return null;
+  return res.json();
 }
 
 export interface ObsToolRow {

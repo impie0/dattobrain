@@ -18,9 +18,9 @@ export function isToolAllowed(toolName: string, allowedTools: string[]): boolean
   return allowedTools.includes(toolName);
 }
 
-/** Denial message — matches MCP Bridge denial format (mcpBridge.ts:74) */
-export function toolDeniedMessage(toolName: string): string {
-  return `Tool '${toolName}' is not permitted for your account.`;
+/** Denial message — SEC: normalized to prevent tool name enumeration via prompt injection */
+export function toolDeniedMessage(_toolName: string): string {
+  return "The requested operation is not permitted for your account. Contact your administrator to adjust your role permissions.";
 }
 
 /**

@@ -31,7 +31,7 @@ description: Next.js frontend serving chat, history, approvals, and admin panel 
 | Route | Purpose |
 |---|---|
 | `/login` | Login form → `POST /api/auth/login` |
-| `/chat` | Main chat + history sidebar + tools panel |
+| `/chat` | Main chat + history sidebar + tools panel. Sends `X-Session-Id` header and `data_mode` in request body for per-session data mode control |
 | `/history` | Conversation list |
 | `/history/[id]` | Conversation detail |
 | `/trace` | Debug: last 20 chats with tool calls |
@@ -41,7 +41,7 @@ description: Next.js frontend serving chat, history, approvals, and admin panel 
 | `/admin/tools` | Tool policies (risk level, approval required) |
 | `/admin/approvals` | Admin approval queue |
 | `/admin/llm-config` | LLM routing config — model per slot, data mode default |
-| `/admin/llm-logs` | LLM request logs — orchestrator/synthesizer model badges, tools called |
+| `/admin/llm-logs` | LLM observability — redesigned with clickable rows and detail panel. Shows orchestrator/synthesizer model badges, token counts, tools called, data mode, pre-query hits |
 | `/admin/data-sync` | Data sync status, record counts, manual sync trigger |
 | `/admin/explorer` | Data Explorer overview — stats, top sites, last sync |
 | `/admin/explorer/sites` | Searchable/paginated sites list |
@@ -55,6 +55,18 @@ description: Next.js frontend serving chat, history, approvals, and admin panel 
 | `/admin/observability/mcp` | MCP Server — bridge health, denied calls, error timeline |
 | `/admin/observability/chat` | Chat/Usage — message volume, active sessions table |
 | `/admin/observability/cache` | Cache — sync history, record counts, cached/live ratio |
+
+## Chat Page Details
+
+The chat page sends two key fields to the [[AI Service]]:
+- **`X-Session-Id` header** — allows the client to maintain session continuity across page reloads and multiple messages
+- **`data_mode` in request body** — override for cached vs live data mode per message (persisted to the session by ai-service)
+
+## LLM Observability Page
+
+The `/admin/llm-logs` page has been redesigned:
+- **Clickable rows** — each LLM request log row expands to a detail panel
+- **Detail panel** shows: orchestrator/synthesizer models and providers, per-stage token counts (prompt/completion/total), tools called, data mode, tool result size, pre-query hit info, system prompt preview, and message count
 
 ## API Client
 

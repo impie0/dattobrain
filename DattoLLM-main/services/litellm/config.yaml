@@ -86,6 +86,19 @@ model_list:
   #     model: gemini/gemini-2.0-flash
   #     api_key: os.environ/GEMINI_API_KEY
 
+  # ── Local models via Ollama (Stage 5) ──────────────────────────────────────
+  # Qwen3 8B: best local model for tool calling (~90% accuracy) and synthesis.
+  # Pull with: docker compose exec ollama ollama pull qwen3:8b
+  # nomic-embed-text: local embeddings (768 dims, ~0.3GB).
+  # Pull with: docker compose exec ollama ollama pull nomic-embed-text
+
+  - model_name: local/qwen3-1.7b
+    litellm_params:
+      model: ollama_chat/qwen3:1.7b
+      api_base: http://ollama:11434
+      supports_function_calling: false
+      request_timeout: 60
+
 litellm_settings:
   drop_params: true       # silently drop unsupported params per provider
   request_timeout: 120

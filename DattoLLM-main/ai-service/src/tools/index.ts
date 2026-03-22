@@ -14,6 +14,7 @@ export { auditTools } from "./audit.js";
 export { activityTools } from "./activity.js";
 export { filterTools } from "./filters.js";
 export { systemTools } from "./system.js";
+export { fleetTools } from "./fleet.js";
 
 import { accountTools } from "./account.js";
 import { siteTools } from "./sites.js";
@@ -24,9 +25,11 @@ import { auditTools } from "./audit.js";
 import { activityTools } from "./activity.js";
 import { filterTools } from "./filters.js";
 import { systemTools } from "./system.js";
+import { fleetTools } from "./fleet.js";
 
 /** Full flat registry — same array shape as the old toolRegistry.ts export. */
 export const toolRegistry = [
+  ...fleetTools,   // Stage 3: MV-backed tools first — LLM sees these before heavy tools
   ...accountTools,
   ...siteTools,
   ...deviceTools,

@@ -10,6 +10,24 @@ import {
 } from "./tokens.js";
 import { trackJti, revokeJti, revokeAllForUser, getRedis } from "./redis.js";
 
+/** Merge role-based tools with per-user overrides from user_tool_overrides.
+ *  If overrides exist they REPLACE the role-based set (admin UI semantics). */
+async function getAllowedTools(userId: string, client: import("pg").PoolClient): Promise<string[]> {
+  const overrides = await client.query(
+    "SELECT tool_name FROM user_tool_overrides WHERE user_id = $1",
+    [userId]
+  );
+  if (overrides.rows.length > 0) {
+    return overrides.rows.map((r: { tool_name: string }) => r.tool_name);
+  }
+  const toolsResult = await client.query(
+    `SELECT DISTINCT tp.tool_name FROM tool_permissions tp
+     JOIN user_roles ur ON ur.role_id = tp.role_id WHERE ur.user_id = $1`,
+    [userId]
+  );
+  return toolsResult.rows.map((r: { tool_name: string }) => r.tool_name);
+}
+
 function log(level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) {
   const line = JSON.stringify({ level, msg, ts: Date.now(), ...extra });
   if (level === "error") process.stderr.write(line + "\n");
@@ -62,12 +80,7 @@ export async function handleLegacyLogin(req: Request, res: Response): Promise<vo
     const roles: string[] = rolesResult.rows.map((r: { name: string }) => r.name);
     const primaryRole = roles[0] ?? "readonly";
 
-    const toolsResult = await client.query(
-      `SELECT DISTINCT tp.tool_name FROM tool_permissions tp
-       JOIN user_roles ur ON ur.role_id = tp.role_id WHERE ur.user_id = $1`,
-      [user.id]
-    );
-    const allowedTools: string[] = toolsResult.rows.map((r: { tool_name: string }) => r.tool_name);
+    const allowedTools = await getAllowedTools(user.id, client);
 
     const privateKey = process.env["JWT_PRIVATE_KEY"]!;
     const key = privateKey.startsWith("-----") ? privateKey : Buffer.from(privateKey, "base64").toString("utf8");
@@ -162,14 +175,7 @@ export async function handleLogin(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    const toolsResult = await client.query(
-      `SELECT DISTINCT tp.tool_name
-       FROM tool_permissions tp
-       JOIN user_roles ur ON ur.role_id = tp.role_id
-       WHERE ur.user_id = $1`,
-      [user.id]
-    );
-    const allowedTools: string[] = toolsResult.rows.map((r: { tool_name: string }) => r.tool_name);
+    const allowedTools = await getAllowedTools(user.id, client);
 
     const rolesResult = await client.query(
       `SELECT r.name FROM roles r
@@ -240,14 +246,7 @@ export async function handleRefresh(req: Request, res: Response): Promise<void> 
       return;
     }
 
-    const toolsResult = await client.query(
-      `SELECT DISTINCT tp.tool_name
-       FROM tool_permissions tp
-       JOIN user_roles ur ON ur.role_id = tp.role_id
-       WHERE ur.user_id = $1`,
-      [tokenRow.user_id]
-    );
-    const allowedTools: string[] = toolsResult.rows.map((r: { tool_name: string }) => r.tool_name);
+    const allowedTools = await getAllowedTools(tokenRow.user_id, client);
 
     const rolesResult = await client.query(
       `SELECT r.name FROM roles r
